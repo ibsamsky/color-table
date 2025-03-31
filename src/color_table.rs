@@ -39,19 +39,16 @@
 
 mod generation;
 
-use generation::Generation;
-
-use crate::{ColorTableError, Result};
-
-use std::{
-    fs::File,
-    io::BufWriter,
-    ops::Deref,
-    path::{Path, PathBuf},
-};
+use std::fs::File;
+use std::io::BufWriter;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
 
 use bincode::{Decode, Encode};
 use bytemuck::{Pod, PodCastError, Zeroable};
+use generation::Generation;
+
+use crate::{ColorTableError, Result};
 
 #[derive(Clone, Copy, Debug, Zeroable, Pod, Encode, Decode)]
 #[repr(transparent)]
