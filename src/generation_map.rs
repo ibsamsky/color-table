@@ -131,4 +131,8 @@ impl GenerationMap {
             }
         }
     }
+
+    pub fn find(&self, idx: ColorFragmentIndex) -> Option<&u64> {
+        self.generations.get(&idx)
+    }
 }

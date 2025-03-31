@@ -76,7 +76,7 @@ impl Deref for ColorFragmentIndex {
 
 #[derive(Clone, Copy, Debug, Zeroable, Pod, Encode, Decode)]
 #[repr(transparent)]
-struct ColorId(u32);
+pub struct ColorId(pub u32);
 
 // ditto above
 impl Deref for ColorId {
@@ -161,5 +161,26 @@ impl ColorTable {
 
     pub fn end_generation(&mut self) -> Result<()> {
         self.generations.end_generation(self.fragments)
+    }
+
+    fn get_fragment(&self, idx: ColorFragmentIndex) -> ColorFragment {
+        // Enjoy Isaac
+        todo!();
+    }
+
+    pub fn search(&self, color_id: ColorId) -> Vec<(u64, u64)> {
+        let mut next = self.color_id_to_last_fragment_mapping[color_id.0 as usize];
+        let mut res = Vec::new();
+        while next != ColorFragmentIndex(0) {
+            let fragment = self.get_fragment(next);
+            let generation = self
+                .generations
+                .find(next)
+                .expect("Cannot find generation of {next:?}");
+            res.push((fragment.color, *generation));
+            next = fragment.parent_pointer;
+        }
+
+        res
     }
 }
