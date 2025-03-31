@@ -81,9 +81,9 @@ impl std::ops::AddAssign<u32> for ColorFragmentIndex {
     }
 }
 
-#[derive(Clone, Copy, Debug, Zeroable, Pod, Encode, Decode)]
+#[derive(Clone, Copy, Debug, Zeroable, Pod, Encode, Decode, Ord, PartialOrd, Eq, PartialEq)]
 #[repr(transparent)]
-pub struct ColorId(u32);
+pub struct ColorId(pub u32);
 
 #[repr(C, packed)]
 #[derive(Clone, Copy, Debug, Zeroable, Pod)]
@@ -189,6 +189,28 @@ impl ColorTable {
         Ok(color_id)
     }
 
+    pub fn fork_color_class(&mut self, parent: ColorId, color: u64) -> Result<ColorId> {
+        if self.generations.current_generation().is_none() {
+            return Err(ColorTableError::InvalidGenerationState);
+        }
+
+        let Some(parent_idx) = self.last_fragment_index(&parent) else {
+            return Err(ColorTableError::InvalidColorId(parent.0));
+        };
+
+        let color_id = self.new_color_class_id();
+        let fragment = ColorFragment {
+            color,
+            parent_pointer: *parent_idx,
+        };
+
+        self.file.write_all(fragment.as_bytes())?;
+
+        self.head += 1;
+        self.color_id_to_last_fragment_mapping.push(self.head);
+        Ok(color_id)
+    }
+
     pub fn start_generation(&mut self, generation: u64) -> Result<()> {
         self.generations
             .start_new_generation_at(self.head, generation)
@@ -210,11 +232,12 @@ impl ColorTable {
     }
 
     fn fragment(&self, idx: &ColorFragmentIndex) -> Option<&ColorFragment> {
+        // requires mmap
         todo!();
     }
 
     #[inline]
-    fn parent(&self, fragment: &ColorFragment) -> Option<&ColorFragment> {
+    pub fn parent(&self, fragment: &ColorFragment) -> Option<&ColorFragment> {
         let ptr = fragment.parent_pointer;
         if ptr == ColorFragmentIndex(0) {
             None
@@ -223,6 +246,7 @@ impl ColorTable {
         }
     }
 
+    // move to iterator soon
     pub fn color_class(&self, color_id: &ColorId) -> Option<Vec<(u64, u64)>> {
         let next = self.last_fragment_index(color_id)?;
         let mut res = Vec::new();
