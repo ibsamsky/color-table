@@ -232,6 +232,9 @@ impl ColorTable {
     }
 
     fn fragment(&self, idx: &ColorFragmentIndex) -> Option<&ColorFragment> {
+        if idx.0 == 0 {
+            return None;
+        }
         // requires mmap
         todo!();
     }
@@ -246,20 +249,39 @@ impl ColorTable {
         }
     }
 
-    // move to iterator soon
-    pub fn color_class(&self, color_id: &ColorId) -> Option<Vec<(u64, u64)>> {
-        let next = self.last_fragment_index(color_id)?;
-        let mut res = Vec::new();
+    pub fn color_class(&self, color_id: &ColorId) -> ClassIter {
+        let idx = self
+            .last_fragment_index(color_id)
+            .unwrap_or(&ColorFragmentIndex(0)); // invalid color id will return an empty iterator
 
-        let mut frag = self.fragment(next)?;
-        res.push((frag.color, *self.generations.find(next)?));
-
-        while let Some(parent) = self.parent(frag) {
-            frag = parent;
-            let ptr = frag.parent_pointer; // packed field, must be copied to local to take a reference
-            res.push((frag.color, *self.generations.find(&ptr)?));
+        ClassIter {
+            color_table: self,
+            idx: *idx,
         }
+    }
+}
 
+pub struct ClassIter<'c> {
+    color_table: &'c ColorTable,
+    idx: ColorFragmentIndex,
+}
+
+// idk if this is bad
+impl<'c> Iterator for ClassIter<'c> {
+    type Item = (u64, u64); // color, generation
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let frag = self.color_table.fragment(&self.idx)?;
+
+        let res = (
+            frag.color,
+            *self
+                .color_table
+                .generations
+                .find(&self.idx)
+                .expect("bug: missing generation"),
+        );
+        self.idx = frag.parent_pointer;
         Some(res)
     }
 }
