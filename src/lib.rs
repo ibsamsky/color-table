@@ -1,8 +1,10 @@
 pub mod color_table;
-pub mod generation_map;
+pub(crate) mod generations;
 
 use thiserror::Error;
 use typed_builder::TypedBuilder;
+
+pub use crate::color_table::{ColorFragment, ColorFragmentIndex, ColorId, ColorTable};
 
 #[derive(Debug, Error)]
 pub enum ColorTableError {
@@ -16,6 +18,8 @@ pub enum ColorTableError {
     InvalidColorId(u32),
     #[error("invalid generation {0}")]
     InvalidGeneration(u64),
+    #[error("invalid generation state")]
+    InvalidGenerationState,
 }
 
 type Result<T, E = ColorTableError> = std::result::Result<T, E>;
@@ -29,7 +33,7 @@ const FILE_NAME_LAST_COLOR_FRAGMENTS_MAPPING: &str = "last_color_fragments_mappi
 const FILE_NAME_GENERATION_RANGES: &str = "generation_ranges";
 
 #[derive(Debug, TypedBuilder)]
-struct ColorTableConfig {
+pub struct ColorTableConfig {
     #[builder(setter(into), default = BUFFER_SIZE)]
     buffer_size: usize,
     #[builder(setter(into), default = String::from(FILE_NAME_COLOR_TABLE))]
