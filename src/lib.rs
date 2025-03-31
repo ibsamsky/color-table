@@ -20,6 +20,8 @@ pub enum ColorTableError {
     InvalidGeneration(u64),
     #[error("invalid generation state")]
     InvalidGenerationState,
+    #[error("not mapped")]
+    NotMapped,
 }
 
 type Result<T, E = ColorTableError> = std::result::Result<T, E>;

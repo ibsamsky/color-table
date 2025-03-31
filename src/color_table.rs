@@ -41,6 +41,7 @@
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use bincode::{Decode, Encode};
@@ -118,9 +119,58 @@ struct DeferredUpdate {
     parent: ColorFragmentIndex,
 }
 
-/// placeholder
 #[derive(Debug)]
-struct ColorTableMmap;
+struct ColorTableMmap {
+    mmap: memmap2::Mmap,
+    file: File,
+}
+
+impl ColorTableMmap {
+    fn new(file: File) -> Result<Self> {
+        if !file.try_lock()? {
+            // could not get file lock
+            return Err(std::io::Error::from(std::io::ErrorKind::Deadlock).into());
+        }
+        let mmap = unsafe { memmap2::MmapOptions::new().map(&file).unwrap() };
+
+        Ok(Self { mmap, file })
+    }
+
+    fn remap(&mut self, new_len: usize) {
+        todo!()
+    }
+
+    // may panic
+    fn get_fragments(&self) -> &[ColorFragment] {
+        bytemuck::cast_slice(&self.mmap)
+    }
+
+    fn get_fragment(&self, index: &ColorFragmentIndex) -> &ColorFragment {
+        &self.get_fragments()[index.0 as usize]
+    }
+
+    fn try_get_fragments(&self) -> Option<&[ColorFragment]> {
+        bytemuck::try_cast_slice(&self.mmap).ok()
+    }
+
+    fn try_get_fragment(&self, index: &ColorFragmentIndex) -> Option<&ColorFragment> {
+        self.try_get_fragments()?.get(index.0 as usize)
+    }
+}
+
+impl Drop for ColorTableMmap {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+impl Deref for ColorTableMmap {
+    type Target = [ColorFragment];
+
+    fn deref(&self) -> &Self::Target {
+        self.get_fragments()
+    }
+}
 
 #[derive(Debug)]
 pub struct ColorTable {
@@ -146,6 +196,7 @@ impl ColorTable {
 
         let mut file = BufWriter::with_capacity(config.buffer_size, file);
         // 12 bytes magic header to make offset calculations easier - maybe store len/format version/checksum later
+        // if this is ever accessed as a fragment (idx 0), the result is valid but meaningless
         file.write_all(b"CTBL\0\0\0\0\0\0\0\0").unwrap();
 
         Ok(Self {
@@ -153,11 +204,31 @@ impl ColorTable {
             file,
             mmap: None,
             needs_remap: false,
-            head: ColorFragmentIndex(0),
+            head: ColorFragmentIndex(1),
             color_id_to_last_fragment_mapping: vec![ColorFragmentIndex(0)],
             delayed_writes: Vec::new(),
             generations: Generations::new(),
         })
+    }
+
+    /// Maps the color table to memory.
+    ///
+    /// If the color table is already mapped, this is a no-op.
+    pub fn map(&mut self) -> Result<()> {
+        if self.mmap.is_none() {
+            self.mmap = Some(ColorTableMmap::new(self.file.get_ref().try_clone()?)?);
+        }
+
+        Ok(())
+    }
+
+    fn get_map(&self) -> Result<&ColorTableMmap> {
+        self.mmap.as_ref().ok_or(ColorTableError::NotMapped)
+    }
+
+    #[inline]
+    pub fn unmap(&mut self) {
+        self.mmap.take();
     }
 
     pub fn load_or_new(dir: impl AsRef<Path>) -> Result<Self> {
@@ -184,8 +255,8 @@ impl ColorTable {
 
         self.file.write_all(fragment.as_bytes())?;
 
-        self.head += 1;
         self.color_id_to_last_fragment_mapping.push(self.head);
+        self.head += 1;
         Ok(color_id)
     }
 
@@ -206,8 +277,8 @@ impl ColorTable {
 
         self.file.write_all(fragment.as_bytes())?;
 
-        self.head += 1;
         self.color_id_to_last_fragment_mapping.push(self.head);
+        self.head += 1;
         Ok(color_id)
     }
 
@@ -231,12 +302,14 @@ impl ColorTable {
             .get(color_id.0 as usize)
     }
 
+    #[inline]
     fn fragment(&self, idx: &ColorFragmentIndex) -> Option<&ColorFragment> {
+        assert!(self.get_map().is_ok(), "color table must be mapped");
         if idx.0 == 0 {
             return None;
         }
-        // requires mmap
-        todo!();
+
+        self.get_map().ok()?.try_get_fragment(idx)
     }
 
     #[inline]
@@ -250,6 +323,7 @@ impl ColorTable {
     }
 
     pub fn color_class(&self, color_id: &ColorId) -> ClassIter {
+        assert!(self.get_map().is_ok(), "color table must be mapped");
         let idx = self
             .last_fragment_index(color_id)
             .unwrap_or(&ColorFragmentIndex(0)); // invalid color id will return an empty iterator
@@ -261,6 +335,7 @@ impl ColorTable {
     }
 }
 
+#[derive(Debug)]
 pub struct ClassIter<'c> {
     color_table: &'c ColorTable,
     idx: ColorFragmentIndex,
@@ -283,5 +358,20 @@ impl<'c> Iterator for ClassIter<'c> {
         );
         self.idx = frag.parent_pointer;
         Some(res)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let lower = if self.idx == ColorFragmentIndex(0) {
+            0
+        } else {
+            1
+        };
+
+        let upper = self
+            .color_table
+            .generations
+            .find(&self.idx)
+            .map(|g| *g as usize + 1);
+        (lower, upper)
     }
 }

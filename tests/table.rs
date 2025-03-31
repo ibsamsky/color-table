@@ -69,3 +69,36 @@ fn fork_one() {
     dbg!(&table);
     dbg!(ct);
 }
+
+#[test]
+fn fork_one_and_iter() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
+
+    ct.start_generation(0).unwrap();
+    let cc_id = ct.new_color_class(0x0123ABCD).unwrap();
+    ct.end_generation().unwrap();
+
+    ct.start_generation(1).unwrap();
+    let fork_id = ct.fork_color_class(cc_id, 0xABCD0123).unwrap();
+    ct.end_generation().unwrap();
+
+    ct.map().unwrap();
+
+    let iter = ct.color_class(&fork_id);
+    dbg!(&iter);
+
+    for (color, generation) in iter {
+        dbg!(color, generation);
+
+        if color == 0x0123ABCD {
+            assert_eq!(generation, 0);
+        }
+
+        if color == 0xABCD0123 {
+            assert_eq!(generation, 1);
+        }
+    }
+
+    ct.unmap();
+}

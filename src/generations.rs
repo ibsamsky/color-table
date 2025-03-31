@@ -93,8 +93,8 @@ impl Generations {
     ) -> Result<()> {
         match self.state {
             GenerationState::None => {
-                // first generation must start at 0
-                if !matches!(head, ColorFragmentIndex(0)) {
+                // first generation must start at 1
+                if !matches!(head, ColorFragmentIndex(1)) {
                     return Err(ColorTableError::InvalidGenerationState);
                 }
                 self.ranges.insert(head..head + 1, generation);
