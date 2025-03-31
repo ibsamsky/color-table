@@ -49,11 +49,10 @@ impl<Context> Decode<Context> for Generations {
         generations
             .iter()
             .zip(gens_vec.iter())
-            .map(|((range, generation), (start, end, generation_))| {
+            .all(|((range, generation), (start, end, generation_))| {
                 &range.start == start && &range.end == end && generation == generation_
             })
-            .all(|x| x)
-            .then(|| ())
+            .then_some(())
             .ok_or(DecodeError::Other(
                 "generations do not match (overlapping ranges?)",
             ))?;

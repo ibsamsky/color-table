@@ -141,7 +141,8 @@ impl ColorTable {
             .read(true)
             .write(true)
             .create(true)
-            .open(&dir.as_ref().join(config.color_table_file_name))?;
+            .truncate(true)
+            .open(dir.as_ref().join(config.color_table_file_name))?;
 
         let mut file = BufWriter::with_capacity(config.buffer_size, file);
         // 12 bytes magic header to make offset calculations easier - maybe store len/format version/checksum later
