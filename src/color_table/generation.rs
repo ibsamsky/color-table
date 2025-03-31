@@ -31,6 +31,7 @@ impl Generation {
         self.end = end;
     }
 
+    // Getters
     pub fn start(&self) -> ColorFragmentIndex {
         self.start
     }

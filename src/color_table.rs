@@ -38,21 +38,32 @@
 //! - in order to save space, fragments are (read: should be) stored iff they contain at least one set bit
 
 mod generation;
+mod generation_map;
 
 use std::fs::File;
 use std::io::BufWriter;
-use std::ops::Deref;
+use std::ops::{Deref, RangeInclusive};
 use std::path::{Path, PathBuf};
 
 use bincode::{Decode, Encode};
 use bytemuck::{Pod, PodCastError, Zeroable};
 use generation::Generation;
+use generation_map::GenerationMap;
+use rangemap::StepLite;
 
 use crate::{ColorTableError, Result};
 
-#[derive(Clone, Copy, Debug, Zeroable, Pod, Encode, Decode)]
+#[derive(Clone, Copy, Debug, Zeroable, Pod, Encode, Decode, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 struct ColorFragmentIndex(u32);
+impl StepLite for ColorFragmentIndex {
+    fn add_one(&self) -> Self {
+        ColorFragmentIndex(self.0 + 1)
+    }
+    fn sub_one(&self) -> Self {
+        ColorFragmentIndex(self.0 - 1)
+    }
+}
 
 // make ColorFragmentIndex act like a u32
 impl Deref for ColorFragmentIndex {
@@ -128,8 +139,8 @@ pub struct ColorTable {
     fragments: usize, // should probably be a u32 (to match ColorFragmentIndex)
     color_id_to_last_fragment_mapping: Vec<ColorFragmentIndex>,
     delayed_writes: Vec<DeferredUpdate>,
-    generation_ranges: Vec<Generation>, // RangeMap<ColorFragmentIndex, u64>
-    generation_state: GenerationState,
+    generations: GenerationMap, // generation_ranges: Vec<Generation>, // RangeMap<ColorFragmentIndex, u64>
+                                // generation_state: GenerationState,
 }
 
 impl ColorTable {
@@ -137,48 +148,24 @@ impl ColorTable {
         todo!()
     }
 
-    fn last_generation(&self) -> Option<&Generation> {
-        self.generation_ranges.last()
+    fn last_generation(&self) -> Option<&RangeInclusive<ColorFragmentIndex>> {
+        self.generations.last_generation()
+        // self.generation_ranges.last()
     }
 
-    fn last_generation_mut(&mut self) -> Option<&mut Generation> {
-        self.generation_ranges.last_mut()
-    }
+    // fn last_generation_mut(&mut self) -> Option<&mut RangeInclusive<ColorFragmentIndex>> {
+    //     // self.generation_ranges.last_mut()
+    // }
 
     pub fn start_generation(&mut self, generation: u64) -> Result<()> {
-        match self.generation_state {
-            GenerationState::Ended(last_generation) if generation > last_generation => {
-                self.generation_state = GenerationState::InProgress(generation, self.fragments);
-                self.generation_ranges.push(Generation::new(
-                    ColorFragmentIndex(self.fragments.try_into().expect("too many fragments")),
-                    generation,
-                ));
-
-                // TODO: deferred writes
-
-                Ok(())
-            }
-            _ => Err(ColorTableError::InvalidGeneration(generation)),
-        }
+        self.generations.start_generation(
+            ColorFragmentIndex(self.fragments.try_into().expect("too many fragments")),
+            generation,
+            self.fragments,
+        )
     }
 
     pub fn end_generation(&mut self) -> Result<()> {
-        let cur_fragments = self.fragments;
-        match self.generation_state {
-            GenerationState::InProgress(generation, fragments) if cur_fragments > fragments => {
-                let Some(last_generation) = self.last_generation_mut() else {
-                    unreachable!() // we just checked that a generation is in progress. if we get here, something is VERY wrong
-                };
-                last_generation.set_end(ColorFragmentIndex(
-                    cur_fragments.try_into().expect("too many fragments"),
-                ));
-                self.generation_state = GenerationState::Ended(generation);
-
-                Ok(())
-            }
-            GenerationState::InProgress(generation, _) | GenerationState::Ended(generation) => {
-                Err(ColorTableError::InvalidGeneration(generation))
-            }
-        }
+        self.generations.end_generation(self.fragments)
     }
 }
