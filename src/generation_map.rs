@@ -1,14 +1,65 @@
-use std::ops::RangeInclusive;
+use std::{fs, ops::RangeInclusive};
 
 use crate::ColorTableError;
 
-use super::{ColorFragmentIndex, GenerationState};
-use bincode::{Decode, Encode};
+use crate::color_table::ColorFragmentIndex;
+use bincode::{
+    Decode, Encode,
+    de::Decoder,
+    enc::Encoder,
+    error::{DecodeError, EncodeError},
+};
 use rangemap::RangeInclusiveMap;
 
+const OUT_FILE_NAME: &str = "generation_map";
+
+#[derive(bincode::Encode, bincode::Decode, PartialEq, Debug)]
+enum GenerationState {
+    Ended(u64),             // last generation number
+    InProgress(u64, usize), // generation number, number of fragments at start of generation
+}
+
+#[derive(PartialEq, Debug)]
 pub struct GenerationMap {
     generations: RangeInclusiveMap<ColorFragmentIndex, u64>,
     state: GenerationState,
+}
+
+impl Encode for GenerationMap {
+    fn encode<E: Encoder>(&self, encoder: &mut E) -> Result<(), EncodeError> {
+        Encode::encode(&self.state, encoder)?;
+        Encode::encode(
+            &self
+                .generations
+                .iter()
+                .map(|(range, generation)| (*range.start(), *range.end(), *generation))
+                .collect::<Vec<_>>(),
+            encoder,
+        )?;
+
+        Ok(())
+    }
+}
+
+impl<Context> Decode<Context> for GenerationMap {
+    fn decode<D: Decoder<Context = Context>>(decoder: &mut D) -> Result<Self, DecodeError> {
+        let state: GenerationState = Decode::decode(decoder)?;
+        let gens_vec: Vec<(ColorFragmentIndex, ColorFragmentIndex, u64)> = Decode::decode(decoder)?;
+
+        let mut generations = RangeInclusiveMap::new();
+
+        for (start, end, generation) in gens_vec {
+            println!(
+                "start: {:?}, end: {:?}, generation: {:?}",
+                start, end, generation
+            );
+            generations.insert(start..=end, generation);
+        }
+        Ok(Self {
+            state: state,
+            generations: generations,
+        })
+    }
 }
 
 impl GenerationMap {
@@ -17,6 +68,17 @@ impl GenerationMap {
             generations: RangeInclusiveMap::new(),
             state: GenerationState::Ended(0),
         }
+    }
+    pub fn from_serialized(&self) -> Self {
+        let mut file = fs::File::open(OUT_FILE_NAME).expect("failed to create file");
+        bincode::decode_from_std_read(&mut file, crate::BINCODE_CONFIG)
+            .expect("deserialization failed")
+    }
+
+    pub fn serialize(&self) {
+        let mut out = fs::File::create(OUT_FILE_NAME).expect("failed to create file");
+        bincode::encode_into_std_write(self, &mut out, crate::BINCODE_CONFIG)
+            .expect("serialization failed");
     }
 
     pub fn last_generation(&self) -> Option<&RangeInclusive<ColorFragmentIndex>> {
@@ -44,6 +106,8 @@ impl GenerationMap {
             GenerationState::Ended(last_generation) if generation > last_generation => {
                 self.state = GenerationState::InProgress(generation, fragments);
                 self.generations.insert(start..=start, generation);
+
+                // TODO: deferred writes
                 Ok(())
             }
             _ => Err(ColorTableError::InvalidGeneration(generation)),

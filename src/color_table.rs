@@ -38,7 +38,6 @@
 //! - in order to save space, fragments are (read: should be) stored iff they contain at least one set bit
 
 mod generation;
-mod generation_map;
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -47,15 +46,15 @@ use std::path::{Path, PathBuf};
 
 use bincode::{Decode, Encode};
 use bytemuck::{Pod, PodCastError, Zeroable};
-use generation::Generation;
-use generation_map::GenerationMap;
+// use generation::Generation;
+use crate::generation_map::GenerationMap;
 use rangemap::StepLite;
 
 use crate::{ColorTableError, Result};
 
 #[derive(Clone, Copy, Debug, Zeroable, Pod, Encode, Decode, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
-struct ColorFragmentIndex(u32);
+pub struct ColorFragmentIndex(pub u32);
 impl StepLite for ColorFragmentIndex {
     fn add_one(&self) -> Self {
         ColorFragmentIndex(self.0 + 1)
@@ -124,11 +123,6 @@ struct DeferredUpdate {
 
 /// placeholder
 struct ColorTableMmap;
-
-enum GenerationState {
-    Ended(u64),             // last generation number
-    InProgress(u64, usize), // generation number, number of fragments at start of generation
-}
 
 pub struct ColorTable {
     directory: PathBuf,

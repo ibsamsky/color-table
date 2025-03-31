@@ -1,4 +1,5 @@
 pub mod color_table;
+pub mod generation_map;
 
 use thiserror::Error;
 use typed_builder::TypedBuilder;
