@@ -299,6 +299,29 @@ impl ColorTable {
         Ok(color_id)
     }
 
+    pub fn extend_color_class(&mut self, parent: ColorId, color: u64) -> Result<()> {
+        if self.generations.current_generation().is_none() {
+            return Err(ColorTableError::InvalidGenerationState);
+        }
+
+        let Some(parent_idx) = self.last_fragment_index(&parent) else {
+            return Err(ColorTableError::InvalidColorId(parent.0));
+        };
+
+        let fragment = ColorFragment {
+            color: color.into(),
+            parent_pointer: *parent_idx,
+        };
+
+        let delayed_write = DeferredUpdate {
+            color_id: parent,
+            parent: self.write_fragment(fragment)?,
+        };
+        self.delayed_writes.push(delayed_write);
+
+        Ok(())
+    }
+
     pub fn start_generation(&mut self, generation: u64) -> Result<()> {
         self.generations
             .start_new_generation_at(self.head, generation)
@@ -308,7 +331,14 @@ impl ColorTable {
         self.generations.end_current_generation_at(self.head)?;
 
         // TODO: write deferred updates
+        self.delayed_writes
+            .sort_unstable_by_key(|delayed_write| delayed_write.color_id);
+        for delayed_write in self.delayed_writes.iter() {
+            self.color_id_to_last_fragment_mapping[delayed_write.color_id.0 as usize] =
+                delayed_write.parent;
+        }
 
+        self.delayed_writes.clear();
         self.file.flush()?;
         Ok(())
     }
