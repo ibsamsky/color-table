@@ -67,7 +67,7 @@ impl<Context> Decode<Context> for Generations {
 }
 
 impl Generations {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             ranges: RangeMap::new(),
             state: GenerationState::None,
@@ -80,7 +80,8 @@ impl Generations {
     }
 
     /// Get the current in-progress generation
-    pub fn current_generation(&self) -> Option<u64> {
+    #[inline]
+    pub const fn current_generation(&self) -> Option<u64> {
         match self.state {
             GenerationState::InProgress(generation, _) => Some(generation),
             _ => None,

@@ -51,7 +51,7 @@ use fs4::fs_std::FileExt;
 use crate::generations::Generations;
 use crate::{ColorTableConfig, ColorTableError, Result};
 
-const TABLE_MAGIC: [u8; 12] = *b"CTBL\x01\0\0\0\0\0\0\0";
+const TABLE_MAGIC: [u8; 12] = *b"CTBL\0\x00\x00\x01\0\0\0\0";
 
 #[derive(Clone, Copy, Debug, Zeroable, Pod, Encode, Decode, Ord, PartialOrd, Eq, PartialEq)]
 #[repr(transparent)]
@@ -89,11 +89,11 @@ impl std::ops::AddAssign<u32> for ColorFragmentIndex {
 #[repr(transparent)]
 pub struct ColorId(pub u32);
 
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Zeroable, Pod)]
 pub struct ColorFragment {
-    color: u64,
     parent_pointer: ColorFragmentIndex, // or Option<NonZero<ColorFragmentIndex>> or something like that
+    color: pack1::U64LE,
 }
 
 impl ColorFragment {
@@ -110,7 +110,7 @@ impl ColorFragment {
     // this is generally unnecessary because of mmap fuckery
     #[inline]
     fn from_bytes(bytes: &[u8]) -> &Self {
-        // due to repr(packed), infallible except for size mismatch
+        // may fail if the bytes are misaligned
         bytemuck::from_bytes(bytes)
     }
 }
@@ -134,6 +134,8 @@ impl ColorTableMmap {
             // could not get file lock
             return Err(std::io::Error::from(std::io::ErrorKind::Deadlock).into());
         }
+        // SAFETY: we hold a read lock on the file. this is not completely safe, but any well-behaved program should respect the lock.
+        // if the file is modified while mmapped, UB
         let mmap = unsafe { memmap2::MmapOptions::new().map(&file).unwrap() };
 
         Ok(Self { mmap, file })
@@ -143,7 +145,7 @@ impl ColorTableMmap {
         todo!()
     }
 
-    // may panic
+    // may panic - seems to work fine even though mmap might be misaligned
     fn get_fragments(&self) -> &[ColorFragment] {
         bytemuck::cast_slice(&self.mmap)
     }
@@ -166,6 +168,7 @@ impl ColorTableMmap {
 
 impl Drop for ColorTableMmap {
     fn drop(&mut self) {
+        // unlock the file so it can be written to again
         let _ = FileExt::unlock(&self.file);
     }
 }
@@ -203,6 +206,7 @@ impl ColorTable {
         let mut file = BufWriter::with_capacity(config.buffer_size, file);
         // 12 bytes magic header to make offset calculations easier - maybe store len/format version/checksum later
         // if this is ever accessed as a fragment (idx 0), the result is valid but meaningless
+        // currently not checked or validated
         file.write_all(&TABLE_MAGIC).unwrap();
 
         Ok(Self {
@@ -234,7 +238,14 @@ impl ColorTable {
     ///
     /// If the color table is already mapped, this is a no-op.
     pub fn map(&mut self) -> Result<()> {
-        if self.mmap.is_none() {
+        // reading while a generation is in progress will give incorrect results
+        if self.generations.current_generation().is_some() {
+            return Err(ColorTableError::InvalidGenerationState);
+        }
+
+        // maybe just error if it's already mapped
+        if !self.is_mapped() {
+            // try_clone() here is ~equivalent to dup(2), so the new fd points to the same file object (this is what we want)
             self.mmap = Some(ColorTableMmap::new(self.file.get_ref().try_clone()?)?);
         }
 
@@ -246,7 +257,7 @@ impl ColorTable {
     }
 
     #[inline]
-    fn is_mapped(&self) -> bool {
+    const fn is_mapped(&self) -> bool {
         self.mmap.is_some()
     }
 
@@ -259,7 +270,7 @@ impl ColorTable {
     }
 
     #[inline]
-    fn new_color_class_id(&self) -> ColorId {
+    const fn new_color_class_id(&self) -> ColorId {
         ColorId(self.color_id_to_last_fragment_mapping.len() as u32)
     }
 
@@ -272,7 +283,7 @@ impl ColorTable {
         let color_id = self.new_color_class_id();
 
         let fragment = ColorFragment {
-            color,
+            color: color.into(),
             parent_pointer: ColorFragmentIndex(0),
         };
 
@@ -296,7 +307,7 @@ impl ColorTable {
 
         let color_id = self.new_color_class_id();
         let fragment = ColorFragment {
-            color,
+            color: color.into(),
             parent_pointer: *parent_idx,
         };
 
@@ -337,11 +348,11 @@ impl ColorTable {
 
     #[inline]
     pub fn parent(&self, fragment: &ColorFragment) -> Option<&ColorFragment> {
-        let ptr = fragment.parent_pointer;
-        if ptr == ColorFragmentIndex(0) {
+        let ptr = &fragment.parent_pointer;
+        if ptr == &ColorFragmentIndex(0) {
             None
         } else {
-            self.fragment(&ptr)
+            self.fragment(ptr)
         }
     }
 
@@ -353,7 +364,7 @@ impl ColorTable {
 
         ClassIter {
             color_table: self,
-            idx: *idx,
+            idx,
         }
     }
 }
@@ -361,7 +372,7 @@ impl ColorTable {
 #[derive(Debug)]
 pub struct ClassIter<'c> {
     color_table: &'c ColorTable,
-    idx: ColorFragmentIndex,
+    idx: &'c ColorFragmentIndex,
 }
 
 // idk if this is bad
@@ -372,19 +383,19 @@ impl<'c> Iterator for ClassIter<'c> {
         let frag = self.color_table.fragment(&self.idx)?;
 
         let res = (
-            frag.color,
+            frag.color.get(),
             *self
                 .color_table
                 .generations
                 .find(&self.idx)
                 .expect("bug: missing generation"),
         );
-        self.idx = frag.parent_pointer;
+        self.idx = &frag.parent_pointer;
         Some(res)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let lower = if self.idx == ColorFragmentIndex(0) {
+        let lower = if self.idx == &ColorFragmentIndex(0) {
             0
         } else {
             1

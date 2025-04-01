@@ -8,7 +8,8 @@ bincode = "2.0.1"
 bytemuck = { version = "1.22.0", features = ["derive"] }
 fs4 = "0.13.1"
 memmap2 = "0.9.5"
-rangemap = "1.5.1"
+pack1 = { version = "1.0.0", features = ["bytemuck"] }
+rangemap = { version = "1.5.1", features = ["const_fn"] } # https://github.com/ripytide/nodit#similar-crates
 thiserror = "2.0.12"
 typed-builder = "0.21.0"
 
@@ -19,3 +20,6 @@ tempfile = "3.19.1"
 [features]
 # enable nightly features (currently unused)
 nightly = []
+
+[profile.release]
+debug = true

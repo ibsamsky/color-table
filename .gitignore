@@ -1,2 +1,6 @@
 /target
-generation_map
+
+# valgrind
+cachegrind.out*
+callgrind.out*
+massif.out*

@@ -111,7 +111,7 @@ fn fork_one_and_iter() {
 
 #[test]
 fn fork_many_and_iter() {
-    const N: usize = 10_000;
+    const N: usize = 100_000;
 
     let dir = tempfile::tempdir().unwrap();
     let mut ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
