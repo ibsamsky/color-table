@@ -133,8 +133,7 @@ impl ColorTableMmap {
     }
 
     fn get_fragment(&self, index: &ColorFragmentIndex) -> &ColorFragment {
-        &self
-            .get_fragments()
+        self.get_fragments()
             .get(index.0 as usize)
             .expect("fragment not found")
     }
@@ -254,7 +253,7 @@ impl ColorTable {
     }
 
     #[inline]
-    const fn new_color_class_id(&self) -> ColorId {
+    fn new_color_class_id(&self) -> ColorId {
         ColorId(self.color_id_to_last_fragment_mapping.len() as u32)
     }
 
@@ -364,14 +363,14 @@ impl<'c> Iterator for ClassIter<'c> {
     type Item = (u64, u64); // color, generation
 
     fn next(&mut self) -> Option<Self::Item> {
-        let frag = self.color_table.fragment(&self.idx)?;
+        let frag = self.color_table.fragment(self.idx)?;
 
         let res = (
             frag.color.get(),
             *self
                 .color_table
                 .generations
-                .find(&self.idx)
+                .find(self.idx)
                 .expect("bug: missing generation"),
         );
         self.idx = &frag.parent_pointer;
@@ -388,7 +387,7 @@ impl<'c> Iterator for ClassIter<'c> {
         let upper = self
             .color_table
             .generations
-            .find(&self.idx)
+            .find(self.idx)
             .map(|g| *g as usize + 1);
         (lower, upper)
     }
