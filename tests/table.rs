@@ -31,7 +31,7 @@ fn new_many() {
     }
     let elapsed = now.elapsed();
     eprintln!(
-        "insert {N} color classes took {elapsed:?} ({:.2} ops/sec, {:?}/op)",
+        "insert {N} colors took {elapsed:?} ({:.2} ops/sec, {:?}/op)",
         N as f64 / elapsed.as_secs_f64(),
         elapsed / N as u32
     );
@@ -40,11 +40,11 @@ fn new_many() {
 
     let ct_file = std::fs::read(dir.path().join("color_table")).unwrap();
     assert_eq!(
-        ct_file.len(),
+        dbg!(ct_file.len()),
         std::mem::size_of::<ColorFragment>() * (N + 1)
     );
 
-    // dbg!(ct_file);
+    // dbg!(bstr::BString::from(ct_file)); // too big :)
     // dbg!(ct);
 }
 
@@ -66,7 +66,7 @@ fn fork_one() {
 
     let table = std::fs::read(dir.path().join("color_table")).unwrap();
     assert_eq!(table.len(), 3 * std::mem::size_of::<ColorFragment>());
-    dbg!(&table);
+    dbg!(bstr::BString::from(table));
     dbg!(ct);
 }
 
@@ -77,6 +77,7 @@ fn fork_one_and_iter() {
 
     ct.start_generation(0).unwrap();
     let cc_id = ct.new_color_class(0x0123ABCD).unwrap();
+    let unforked_id = ct.new_color_class(0x4567EF00).unwrap();
     ct.end_generation().unwrap();
 
     ct.start_generation(1).unwrap();
@@ -100,5 +101,51 @@ fn fork_one_and_iter() {
         }
     }
 
+    for (color, generation) in ct.color_class(&unforked_id) {
+        dbg!(color, generation);
+        assert_eq!(color, 0x4567EF00);
+        assert_eq!(generation, 0);
+    }
+    ct.unmap();
+}
+
+#[test]
+fn fork_many_and_iter() {
+    const N: usize = 10_000;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
+
+    let now = std::time::Instant::now();
+    ct.start_generation(0).unwrap();
+    let mut cc_id = ct.new_color_class(0).unwrap();
+    ct.end_generation().unwrap();
+    for g in 1..N {
+        ct.start_generation(g as u64).unwrap();
+        cc_id = ct.fork_color_class(cc_id, g as u64).unwrap();
+        ct.end_generation().unwrap();
+    }
+    let elapsed = now.elapsed();
+    eprintln!(
+        "fork {N} colors took {elapsed:?} ({:.2} ops/sec, {:?}/op)",
+        N as f64 / elapsed.as_secs_f64(),
+        elapsed / N as u32
+    );
+
+    ct.map().unwrap();
+
+    let iter = ct.color_class(&cc_id);
+
+    let now = std::time::Instant::now();
+    for (i, (color, generation)) in (0..N).rev().zip(iter) {
+        assert_eq!(color, i as u64);
+        assert_eq!(generation, color);
+    }
+    let elapsed = now.elapsed();
+    eprintln!(
+        "iter {N} colors took {elapsed:?} ({:.2} ops/sec, {:?}/op)",
+        N as f64 / elapsed.as_secs_f64(),
+        elapsed / N as u32
+    );
     ct.unmap();
 }

@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use bincode::de::Decoder;
 use bincode::enc::Encoder;
 use bincode::error::{DecodeError, EncodeError};
@@ -85,6 +87,12 @@ impl Generations {
         }
     }
 
+    fn range_of(&self, generation: u64) -> Option<&Range<ColorFragmentIndex>> {
+        self.ranges
+            .iter()
+            .find_map(|(range, generation_)| (*generation_ == generation).then_some(range))
+    }
+
     /// Start a new generation at the given head fragment
     pub fn start_new_generation_at(
         &mut self,
@@ -163,7 +171,7 @@ mod tests {
     #[test]
     fn serialize_deserialize() {
         let mut g = Generations::new();
-        let mut head = ColorFragmentIndex(0);
+        let mut head = ColorFragmentIndex(1);
 
         // start generation 1
         g.start_new_generation_at(head, 1).unwrap();
@@ -187,7 +195,7 @@ mod tests {
         g.end_current_generation_at(head).unwrap();
 
         let bytes = bincode::encode_to_vec(&g, crate::BINCODE_CONFIG).unwrap();
-        dbg!(&bytes);
+        dbg!(bstr::BString::from(bytes.clone()));
         let (deser, _) = bincode::decode_from_slice(&bytes, crate::BINCODE_CONFIG).unwrap();
         assert_eq!(g, deser);
 

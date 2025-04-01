@@ -6,10 +6,16 @@ edition = "2024"
 [dependencies]
 bincode = "2.0.1"
 bytemuck = { version = "1.22.0", features = ["derive"] }
+fs4 = "0.13.1"
 memmap2 = "0.9.5"
 rangemap = "1.5.1"
 thiserror = "2.0.12"
 typed-builder = "0.21.0"
 
 [dev-dependencies]
+bstr = "1.11.3"
 tempfile = "3.19.1"
+
+[features]
+# enable nightly features (currently unused)
+nightly = []
