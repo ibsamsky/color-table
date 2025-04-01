@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 bincode = "2.0.1"
-bytemuck = { version = "1.22.0", features = ["derive"] }
+bytemuck = { version = "1.22.0", features = ["align_offset", "derive", "min_const_generics", "must_cast", "track_caller"] }
 fs4 = "0.13.1"
 memmap2 = "0.9.5"
 pack1 = { version = "1.0.0", features = ["bytemuck"] }

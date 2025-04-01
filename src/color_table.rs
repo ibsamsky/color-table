@@ -37,7 +37,7 @@
 //! in our use case (kmer to sample mapping), the following is also true:
 //! - for the set of kmers `K`, the mapping `K -> C` is surjective.
 //!   - that is, each color class may correspond to multiple kmers, and every possible kmer maps to some color class (for the vast majority of kmers, this is the null color class)
-//! - in order to save space, fragments are (read: should be) stored iff they contain at least one set bit
+//! - in order to save space, fragments are (read: should be) stored only if they contain at least one set bit
 
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -45,7 +45,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use bincode::{Decode, Encode};
-use bytemuck::{Pod, PodCastError, Zeroable};
+use bytemuck::{Pod, Zeroable};
 use fs4::fs_std::FileExt;
 
 use crate::generations::Generations;
@@ -96,25 +96,6 @@ pub struct ColorFragment {
     color: pack1::U64LE,
 }
 
-impl ColorFragment {
-    #[inline]
-    fn as_bytes(&self) -> &[u8] {
-        bytemuck::bytes_of(self)
-    }
-
-    #[inline]
-    fn try_from_bytes(bytes: &[u8]) -> Result<&Self, PodCastError> {
-        bytemuck::try_from_bytes(bytes)
-    }
-
-    // this is generally unnecessary because of mmap fuckery
-    #[inline]
-    fn from_bytes(bytes: &[u8]) -> &Self {
-        // may fail if the bytes are misaligned
-        bytemuck::from_bytes(bytes)
-    }
-}
-
 /// Deferred update to a color class' tail fragment.
 #[derive(Debug)]
 struct DeferredUpdate {
@@ -132,7 +113,7 @@ impl ColorTableMmap {
     fn new(file: File) -> Result<Self> {
         if !FileExt::try_lock_shared(&file)? {
             // could not get file lock
-            return Err(std::io::Error::from(std::io::ErrorKind::Deadlock).into());
+            return Err(std::io::Error::from(std::io::ErrorKind::ResourceBusy).into());
         }
         // SAFETY: we hold a read lock on the file. this is not completely safe, but any well-behaved program should respect the lock.
         // if the file is modified while mmapped, UB
@@ -146,6 +127,7 @@ impl ColorTableMmap {
     }
 
     // may panic - seems to work fine even though mmap might be misaligned
+    #[inline]
     fn get_fragments(&self) -> &[ColorFragment] {
         bytemuck::cast_slice(&self.mmap)
     }
@@ -157,6 +139,7 @@ impl ColorTableMmap {
             .expect("fragment not found")
     }
 
+    #[inline]
     fn try_get_fragments(&self) -> Option<&[ColorFragment]> {
         bytemuck::try_cast_slice(&self.mmap).ok()
     }
@@ -224,12 +207,13 @@ impl ColorTable {
     /// Write a fragment to the end of the file.
     ///
     /// Returns the index of the fragment.
-    fn write_fragment(&mut self, fragment: &ColorFragment) -> Result<ColorFragmentIndex> {
+    fn write_fragment(&mut self, fragment: ColorFragment) -> Result<ColorFragmentIndex> {
         if self.is_mapped() {
             return Err(std::io::Error::from(std::io::ErrorKind::ResourceBusy).into());
         }
         let index = self.head;
-        self.file.write_all(fragment.as_bytes())?;
+        let bytes = bytemuck::bytes_of(&fragment);
+        self.file.write_all(bytes.as_ref())?;
         self.head += 1;
         Ok(index)
     }
@@ -287,7 +271,7 @@ impl ColorTable {
             parent_pointer: ColorFragmentIndex(0),
         };
 
-        let fragment_idx = self.write_fragment(&fragment)?;
+        let fragment_idx = self.write_fragment(fragment)?;
         self.color_id_to_last_fragment_mapping.push(fragment_idx);
         Ok(color_id)
     }
@@ -311,7 +295,7 @@ impl ColorTable {
             parent_pointer: *parent_idx,
         };
 
-        let fragment_idx = self.write_fragment(&fragment)?;
+        let fragment_idx = self.write_fragment(fragment)?;
         self.color_id_to_last_fragment_mapping.push(fragment_idx);
         Ok(color_id)
     }
