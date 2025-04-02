@@ -5,16 +5,19 @@ edition = "2024"
 
 [dependencies]
 bincode = "2.0.1"
+bitfrob = "1.3.2"
 bytemuck = { version = "1.22.0", features = ["align_offset", "derive", "min_const_generics", "must_cast", "track_caller"] }
 fs4 = "0.13.1"
 memmap2 = "0.9.5"
 pack1 = { version = "1.0.0", features = ["bytemuck"] }
 rangemap = { version = "1.5.1", features = ["const_fn"] } # https://github.com/ripytide/nodit#similar-crates
+roaring = "0.10.10"
 thiserror = "2.0.12"
 typed-builder = "0.21.0"
 
 [dev-dependencies]
 bstr = "1.11.3"
+fastrand = "2.3.0"
 tempfile = "3.19.1"
 
 [features]

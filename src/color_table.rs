@@ -45,8 +45,10 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use bincode::{Decode, Encode};
+use bitfrob::U64BitIterLow;
 use bytemuck::{Pod, Zeroable};
 use fs4::fs_std::FileExt;
+use roaring::RoaringBitmap;
 
 use crate::generations::Generations;
 use crate::{ColorTableConfig, ColorTableError, Result};
@@ -398,6 +400,30 @@ impl Drop for ColorTable {
 pub struct ClassIter<'c> {
     color_table: &'c ColorTable,
     idx: &'c ColorFragmentIndex,
+}
+
+impl<'c> ClassIter<'c> {
+    pub fn into_bitmap(self) -> RoaringBitmap {
+        let mut bitmap = RoaringBitmap::new();
+        for (color, _gen) in self {
+            let gen_offset = _gen
+                .checked_mul(u64::BITS as u64)
+                .expect("generation overflow");
+
+            let bits = U64BitIterLow::from_count_and_bits(1, color)
+                .enumerate()
+                .filter_map(|(n, b)| {
+                    if b == 1 {
+                        Some(n as u32 + gen_offset as u32)
+                    } else {
+                        None
+                    }
+                });
+
+            bitmap.extend(bits);
+        }
+        bitmap
+    }
 }
 
 // idk if this is bad

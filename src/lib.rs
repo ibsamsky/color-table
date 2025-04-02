@@ -7,6 +7,7 @@ pub use color_table::{ColorFragment, ColorFragmentIndex, ColorId, ColorTable};
 
 pub(crate) mod generations;
 
+pub use roaring;
 use thiserror::Error;
 use typed_builder::TypedBuilder;
 
