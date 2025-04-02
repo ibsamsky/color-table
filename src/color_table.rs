@@ -4,7 +4,7 @@
 //!
 //! - color class: a set of color fragments. essentially one "color". analogous to a large bitvec/bitset
 //!   - the null color class: a color class with id `0`, with no fragments
-//!   - tail fragment: the last fragment of a color class
+//!   - "head" fragment: the last fragment of a color class (no other fragments point to this fragment except for forks)
 //! - color fragment: a "partial color" (bitset with 64 items) and a pointer to the parent fragment
 //! - generation: a range of color fragments that are all part of the same epoch
 //!
@@ -30,8 +30,8 @@
 //!   - in other words, all fragments up to the point of the fork are shared by both the parent and the forked color class
 //!   - the parent color class will continue to exist and can be forked or extended as normal
 //! - color classes can be extended. this simply adds a new fragment to the color class
-//!   - updating the tail fragment of the color class is deferred until the next generation. this allows the index to be forked from the old tail fragment until the next generation
-//! - fragment indexes start at 1. fragment 0 is reserved as the parent of the head fragment in a color class
+//!   - updating the "head" fragment of the color class is deferred until the next generation. this allows the index to be forked from the old "head" fragment until the next generation
+//! - fragment indexes start at 1. fragment 0 is reserved as the parent of the "tail" fragment in a color class
 //!   - each fragment can be found at offset `sizeof::<ColorFragment>() * fragment_index` in the color table file
 //!
 //! in our use case (kmer to sample mapping), the following is also true:
@@ -96,11 +96,11 @@ pub struct ColorFragment {
     color: pack1::U64LE,
 }
 
-/// Deferred update to a color class' tail fragment.
+/// Deferred update to a color class' "head" fragment.
 #[derive(Debug)]
 struct DeferredUpdate {
     color_id: ColorId,
-    parent: ColorFragmentIndex,
+    head: ColorFragmentIndex,
 }
 
 #[derive(Debug)]
@@ -128,23 +128,12 @@ impl ColorTableMmap {
 
     // may panic - seems to work fine even though mmap might be misaligned
     #[inline]
-    fn get_fragments(&self) -> &[ColorFragment] {
+    fn as_fragments(&self) -> &[ColorFragment] {
         bytemuck::cast_slice(&self.mmap)
     }
 
-    fn get_fragment(&self, index: &ColorFragmentIndex) -> &ColorFragment {
-        self.get_fragments()
-            .get(index.0 as usize)
-            .expect("fragment not found")
-    }
-
-    #[inline]
-    fn try_get_fragments(&self) -> Option<&[ColorFragment]> {
-        bytemuck::try_cast_slice(&self.mmap).ok()
-    }
-
-    fn try_get_fragment(&self, index: &ColorFragmentIndex) -> Option<&ColorFragment> {
-        self.try_get_fragments()?.get(index.0 as usize)
+    fn get_fragment(&self, index: &ColorFragmentIndex) -> Option<&ColorFragment> {
+        self.as_fragments().get(index.0 as usize)
     }
 }
 
@@ -159,7 +148,7 @@ impl Deref for ColorTableMmap {
     type Target = [ColorFragment];
 
     fn deref(&self) -> &Self::Target {
-        self.get_fragments()
+        self.as_fragments()
     }
 }
 
@@ -313,12 +302,14 @@ impl ColorTable {
             parent_pointer: *parent_idx,
         };
 
+        let fragment_idx = self.write_fragment(fragment)?;
+
         let delayed_write = DeferredUpdate {
             color_id: parent,
-            parent: self.write_fragment(fragment)?,
+            head: fragment_idx,
         };
-        self.delayed_writes.push(delayed_write);
 
+        self.delayed_writes.push(delayed_write);
         Ok(())
     }
 
@@ -330,16 +321,20 @@ impl ColorTable {
     pub fn end_generation(&mut self) -> Result<()> {
         self.generations.end_current_generation_at(self.head)?;
 
-        // TODO: write deferred updates
+        // sorting is useful for cache locality? maybe?
         self.delayed_writes
             .sort_unstable_by_key(|delayed_write| delayed_write.color_id);
-        for delayed_write in self.delayed_writes.iter() {
-            self.color_id_to_last_fragment_mapping[delayed_write.color_id.0 as usize] =
-                delayed_write.parent;
+
+        // borrow check trolling me
+        for delayed_write in self.delayed_writes.drain(..) {
+            let color_id = delayed_write.color_id;
+            self.color_id_to_last_fragment_mapping
+                .get_mut(color_id.0 as usize)
+                .map(|v| *v = delayed_write.head)
+                .ok_or(ColorTableError::InvalidColorId(color_id.0))?;
         }
 
-        self.delayed_writes.clear();
-        self.file.flush()?;
+        self.file.flush()?; // maybe don't flush every time? we only need the file to be updated when we mmap
         Ok(())
     }
 
@@ -356,7 +351,7 @@ impl ColorTable {
             return None;
         }
 
-        self.get_map().ok()?.try_get_fragment(idx)
+        self.get_map().ok()?.get_fragment(idx)
     }
 
     #[inline]
