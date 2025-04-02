@@ -117,7 +117,7 @@ impl ColorTableMmap {
         }
         // SAFETY: we hold a read lock on the file. this is not completely safe, but any well-behaved program should respect the lock.
         // if the file is modified while mmapped, UB
-        let mmap = unsafe { memmap2::MmapOptions::new().map(&file).unwrap() };
+        let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
 
         Ok(Self { mmap, file })
     }
@@ -126,7 +126,7 @@ impl ColorTableMmap {
         todo!()
     }
 
-    // may panic - seems to work fine even though mmap might be misaligned
+    // may panic in theory, but POSIX standards should guarantee that the memory is aligned to the page size (4KiB)
     #[inline]
     fn as_fragments(&self) -> &[ColorFragment] {
         bytemuck::cast_slice(&self.mmap)
@@ -178,7 +178,7 @@ impl ColorTable {
         // 12 bytes magic header to make offset calculations easier - maybe store len/format version/checksum later
         // if this is ever accessed as a fragment (idx 0), the result is valid but meaningless
         // currently not checked or validated
-        file.write_all(&TABLE_MAGIC).unwrap();
+        file.write_all(&TABLE_MAGIC)?;
 
         Ok(Self {
             directory: dir.as_ref().to_path_buf(),
@@ -192,18 +192,17 @@ impl ColorTable {
         })
     }
 
-    /// Write a fragment to the end of the file.
-    ///
-    /// Returns the index of the fragment.
-    fn write_fragment(&mut self, fragment: ColorFragment) -> Result<ColorFragmentIndex> {
-        if self.is_mapped() {
-            return Err(std::io::Error::from(std::io::ErrorKind::ResourceBusy).into());
-        }
-        let index = self.head;
-        let bytes = bytemuck::bytes_of(&fragment);
-        self.file.write_all(bytes.as_ref())?;
-        self.head += 1;
-        Ok(index)
+    pub fn load_or_new(dir: impl AsRef<Path>) -> Result<Self> {
+        todo!()
+    }
+
+    pub fn sync(&mut self) -> Result<()> {
+        // sync to disk
+        self.file.flush()?;
+
+        // TODO: also include other color table fields (with bincode)
+
+        Ok(())
     }
 
     /// Maps the color table to memory.
@@ -217,6 +216,8 @@ impl ColorTable {
 
         // maybe just error if it's already mapped
         if !self.is_mapped() {
+            // sync to disk
+            self.file.flush()?;
             // try_clone() here is ~equivalent to dup(2), so the new fd points to the same file object (this is what we want)
             self.mmap = Some(ColorTableMmap::new(self.file.get_ref().try_clone()?)?);
         }
@@ -237,8 +238,18 @@ impl ColorTable {
         self.mmap.take();
     }
 
-    pub fn load_or_new(dir: impl AsRef<Path>) -> Result<Self> {
-        todo!()
+    /// Write a fragment to the end of the file.
+    ///
+    /// Returns the index of the fragment.
+    fn write_fragment(&mut self, fragment: ColorFragment) -> Result<ColorFragmentIndex> {
+        if self.is_mapped() {
+            return Err(std::io::Error::from(std::io::ErrorKind::ResourceBusy).into());
+        }
+        let index = self.head;
+        let bytes = bytemuck::bytes_of(&fragment);
+        self.file.write_all(bytes.as_ref())?;
+        self.head += 1;
+        Ok(index)
     }
 
     #[inline]
@@ -334,7 +345,6 @@ impl ColorTable {
                 .ok_or(ColorTableError::InvalidColorId(color_id.0))?;
         }
 
-        self.file.flush()?; // maybe don't flush every time? we only need the file to be updated when we mmap
         Ok(())
     }
 
@@ -374,6 +384,13 @@ impl ColorTable {
             color_table: self,
             idx,
         }
+    }
+}
+
+impl Drop for ColorTable {
+    fn drop(&mut self) {
+        // if this is run before unmap, it may block/error
+        let _ = self.sync();
     }
 }
 

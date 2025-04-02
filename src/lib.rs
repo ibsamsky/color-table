@@ -1,10 +1,14 @@
-pub mod color_table;
+//! color table!
+
+#![warn(/*missing_docs,*/ clippy::unwrap_used)]
+
+mod color_table;
+pub use color_table::{ColorFragment, ColorFragmentIndex, ColorId, ColorTable};
+
 pub(crate) mod generations;
 
 use thiserror::Error;
 use typed_builder::TypedBuilder;
-
-pub use crate::color_table::{ColorFragment, ColorFragmentIndex, ColorId, ColorTable};
 
 #[derive(Debug, Error)]
 pub enum ColorTableError {
