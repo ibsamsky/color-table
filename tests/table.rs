@@ -324,3 +324,34 @@ fn large_extend_intersect() {
 
     dbg!(&intersection);
 }
+
+#[test]
+fn sync_and_load() {
+    let get_color = || random_color(16);
+    let dir = tempfile::tempdir().unwrap();
+    let mut ct = ColorTable::load_or_new(&dir, ColorTableConfig::default()).unwrap();
+
+    ct.start_generation(0).unwrap();
+    let cc1 = ct.new_color_class(get_color()).unwrap();
+    let cc2 = ct.new_color_class(get_color()).unwrap();
+    ct.end_generation().unwrap();
+
+    ct.start_generation(1).unwrap();
+    ct.extend_color_class(cc1, get_color()).unwrap();
+    let cc3 = ct.fork_color_class(cc2, get_color()).unwrap();
+    ct.end_generation().unwrap();
+
+    ct.sync().unwrap();
+    let mut ct2 = ColorTable::load(&dir, ColorTableConfig::default()).unwrap();
+
+    // concurrent read access is supported
+    ct.map().unwrap();
+    ct2.map().unwrap();
+
+    for cc in [&cc1, &cc2, &cc3] {
+        assert_eq!(
+            ct.color_class(cc).into_bitmap(),
+            ct2.color_class(cc).into_bitmap()
+        );
+    }
+}

@@ -13,6 +13,8 @@ use typed_builder::TypedBuilder;
 
 #[derive(Debug, Error)]
 pub enum ColorTableError {
+    #[error("saving color table failed")]
+    Save,
     #[error("loading color table failed")]
     Load,
     #[error("I/O error")]
@@ -39,7 +41,7 @@ const FILE_NAME_COLOR_TABLE: &str = "color_table";
 const FILE_NAME_LAST_COLOR_FRAGMENTS_MAPPING: &str = "last_color_fragments_mapping";
 const FILE_NAME_GENERATION_RANGES: &str = "generation_ranges";
 
-#[derive(Debug, TypedBuilder)]
+#[derive(Debug, Clone, TypedBuilder)]
 pub struct ColorTableConfig {
     #[builder(setter(into), default = BUFFER_SIZE)]
     buffer_size: usize,

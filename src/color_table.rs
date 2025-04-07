@@ -40,7 +40,7 @@
 //! - in order to save space, fragments are (read: should be) stored only if they contain at least one set bit
 
 use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::io::{self, BufWriter, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
@@ -115,7 +115,7 @@ impl ColorTableMmap {
     fn new(file: File) -> Result<Self> {
         if !FileExt::try_lock_shared(&file)? {
             // could not get file lock
-            return Err(std::io::Error::from(std::io::ErrorKind::ResourceBusy).into());
+            return Err(io::Error::from(io::ErrorKind::ResourceBusy).into());
         }
         // SAFETY: we hold a read lock on the file. this is not completely safe, but any well-behaved program should respect the lock.
         // if the file is modified while mmapped, UB
@@ -124,8 +124,8 @@ impl ColorTableMmap {
         Ok(Self { mmap, file })
     }
 
-    fn remap(&mut self, new_len: usize) {
-        todo!()
+    fn remap(&mut self, _new_len: usize) {
+        unimplemented!();
     }
 
     // may panic in theory, but POSIX standards should guarantee that the memory is aligned to the page size (4KiB)
@@ -157,10 +157,11 @@ impl Deref for ColorTableMmap {
 #[derive(Debug)]
 pub struct ColorTable {
     directory: PathBuf,
+    config: ColorTableConfig,
     file: BufWriter<File>,
     mmap: Option<ColorTableMmap>,
     // mysterious field that is never read
-    needs_remap: bool,
+    // needs_remap: bool,
     head: ColorFragmentIndex, // more or less file offset of last fragment
     color_id_to_last_fragment_mapping: Vec<ColorFragmentIndex>,
     delayed_writes: Vec<DeferredUpdate>,
@@ -174,7 +175,7 @@ impl ColorTable {
             .write(true)
             .create(true)
             .truncate(true)
-            .open(dir.as_ref().join(config.color_table_file_name))?;
+            .open(dir.as_ref().join(&config.color_table_file_name))?;
 
         let mut file = BufWriter::with_capacity(config.buffer_size, file);
         // 12 bytes magic header to make offset calculations easier - maybe store len/format version/checksum later
@@ -184,9 +185,10 @@ impl ColorTable {
 
         Ok(Self {
             directory: dir.as_ref().to_path_buf(),
+            config,
             file,
             mmap: None,
-            needs_remap: false,
+            // needs_remap: false,
             head: ColorFragmentIndex(1),
             color_id_to_last_fragment_mapping: vec![ColorFragmentIndex(0)],
             delayed_writes: Vec::new(),
@@ -194,15 +196,89 @@ impl ColorTable {
         })
     }
 
-    pub fn load_or_new(dir: impl AsRef<Path>) -> Result<Self> {
-        todo!()
+    pub fn load_or_new(dir: impl AsRef<Path>, config: ColorTableConfig) -> Result<Self> {
+        if let Ok(table) = ColorTable::load(&dir, config.clone()) {
+            return Ok(table);
+        }
+
+        ColorTable::new(dir, config)
+    }
+
+    pub fn load(dir: impl AsRef<Path>, config: ColorTableConfig) -> Result<Self> {
+        let color_table = File::open(dir.as_ref().join(&config.color_table_file_name))?;
+        let ct_size = color_table.metadata()?.len();
+        if ct_size % std::mem::size_of::<ColorFragment>() as u64 != 0 {
+            return Err(io::Error::from(io::ErrorKind::InvalidData).into());
+        }
+
+        let head =
+            ColorFragmentIndex((ct_size / std::mem::size_of::<ColorFragment>() as u64) as u32);
+
+        let mut generations_reader = io::BufReader::new(File::open(
+            dir.as_ref().join(&config.generation_ranges_file_name),
+        )?);
+        let generations: Generations =
+            bincode::decode_from_std_read(&mut generations_reader, crate::BINCODE_CONFIG)
+                .map_err(|_| ColorTableError::Load)?;
+
+        let mut fragment_map_reader = io::BufReader::new(File::open(
+            dir.as_ref()
+                .join(&config.last_color_fragments_mapping_file_name),
+        )?);
+        let fragment_map: Vec<ColorFragmentIndex> =
+            bincode::decode_from_std_read(&mut fragment_map_reader, crate::BINCODE_CONFIG)
+                .map_err(|_| ColorTableError::Load)?;
+
+        if fragment_map.is_empty() {
+            return Err(io::Error::from(io::ErrorKind::InvalidData).into());
+        }
+
+        let buffer_size = config.buffer_size;
+
+        Ok(Self {
+            directory: dir.as_ref().to_path_buf(),
+            config,
+            file: BufWriter::with_capacity(buffer_size, color_table),
+            mmap: None,
+            // needs_remap: false,
+            head,
+            color_id_to_last_fragment_mapping: fragment_map,
+            delayed_writes: Vec::new(),
+            generations,
+        })
     }
 
     pub fn sync(&mut self) -> Result<()> {
-        // sync to disk
+        // if mmapped, don't sync
+        // alternatively, unmap before syncing
+        if self.is_mapped() {
+            return Err(io::Error::from(io::ErrorKind::ResourceBusy).into());
+        }
+
+        // sync table to disk
         self.file.flush()?;
 
-        // TODO: also include other color table fields (with bincode)
+        let mut generations_writer = io::BufWriter::new(File::create(
+            self.directory
+                .join(&self.config.generation_ranges_file_name),
+        )?);
+        bincode::encode_into_std_write(
+            &self.generations,
+            &mut generations_writer,
+            crate::BINCODE_CONFIG,
+        )
+        .map_err(|_| ColorTableError::Save)?;
+
+        let mut fragment_map_writer = io::BufWriter::new(File::create(
+            self.directory
+                .join(&self.config.last_color_fragments_mapping_file_name),
+        )?);
+        bincode::encode_into_std_write(
+            &self.color_id_to_last_fragment_mapping,
+            &mut fragment_map_writer,
+            crate::BINCODE_CONFIG,
+        )
+        .map_err(|_| ColorTableError::Save)?;
 
         Ok(())
     }
@@ -245,7 +321,7 @@ impl ColorTable {
     /// Returns the index of the fragment.
     fn write_fragment(&mut self, fragment: ColorFragment) -> Result<ColorFragmentIndex> {
         if self.is_mapped() {
-            return Err(std::io::Error::from(std::io::ErrorKind::ResourceBusy).into());
+            return Err(io::Error::from(io::ErrorKind::ResourceBusy).into());
         }
         let index = self.head;
         let bytes = bytemuck::bytes_of(&fragment);
@@ -347,6 +423,8 @@ impl ColorTable {
                 .ok_or(ColorTableError::InvalidColorId(color_id.0))?;
         }
 
+        self.file.flush()?;
+
         Ok(())
     }
 
@@ -367,7 +445,7 @@ impl ColorTable {
     }
 
     #[inline]
-    pub fn parent(&self, fragment: &ColorFragment) -> Option<&ColorFragment> {
+    pub fn parent_of(&self, fragment: &ColorFragment) -> Option<&ColorFragment> {
         let ptr = &fragment.parent_pointer;
         if ptr == &ColorFragmentIndex(0) {
             None
