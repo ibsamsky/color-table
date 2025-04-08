@@ -1,13 +1,20 @@
 //! color table!
 
-#![warn(/*missing_docs,*/ clippy::unwrap_used)]
+#![cfg_attr(
+    feature = "unstable_docs",
+    feature(doc_auto_cfg),
+    feature(doc_cfg_hide),
+    doc(cfg_hide(doc))
+)]
+#![warn(clippy::unwrap_used)]
 
 mod color_table;
 pub use color_table::{ColorFragment, ColorFragmentIndex, ColorId, ColorTable};
 
 pub(crate) mod generations;
 
-pub use roaring;
+#[cfg(any(feature = "roaring", doc))]
+pub use ::roaring;
 use thiserror::Error;
 use typed_builder::TypedBuilder;
 
@@ -19,8 +26,6 @@ pub enum ColorTableError {
     Load,
     #[error("I/O error")]
     Io(#[from] std::io::Error),
-    // #[error("mmap error")] // mmap is also io basically
-    // Mmap,
     #[error("invalid color id {0}")]
     InvalidColorId(u32),
     #[error("invalid generation {0}")]
@@ -38,8 +43,8 @@ const BINCODE_CONFIG: bincode::config::Configuration = bincode::config::standard
 const BUFFER_SIZE: usize = 1 << 20; // 1 MiB
 
 const FILE_NAME_COLOR_TABLE: &str = "color_table";
-const FILE_NAME_LAST_COLOR_FRAGMENTS_MAPPING: &str = "last_color_fragments_mapping";
-const FILE_NAME_GENERATION_RANGES: &str = "generation_ranges";
+const FILE_NAME_HEAD_FRAGMENT_MAP: &str = "head_fragment_map";
+const FILE_NAME_GENERATIONS: &str = "generations";
 
 #[derive(Debug, Clone, TypedBuilder)]
 pub struct ColorTableConfig {
@@ -49,11 +54,11 @@ pub struct ColorTableConfig {
     color_table_file_name: String,
     #[builder(
         setter(into),
-        default = String::from(FILE_NAME_LAST_COLOR_FRAGMENTS_MAPPING)
+        default = String::from(FILE_NAME_HEAD_FRAGMENT_MAP)
     )]
-    last_color_fragments_mapping_file_name: String,
-    #[builder(setter(into), default = String::from(FILE_NAME_GENERATION_RANGES))]
-    generation_ranges_file_name: String,
+    head_fragment_map_file_name: String,
+    #[builder(setter(into), default = String::from(FILE_NAME_GENERATIONS))]
+    generations_file_name: String,
 }
 
 impl Default for ColorTableConfig {

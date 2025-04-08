@@ -12,6 +12,23 @@ fn random_color(max_cardinality: u32) -> u64 {
     color
 }
 
+macro_rules! display_timings {
+    ($what:literal, $n:expr, $elapsed:expr) => {{
+        let elapsed: ::std::time::Duration = $elapsed;
+        let n = $n;
+        eprintln!(
+            concat!($what, " (x{}) took {:?} ({:.2} ops/sec, {:?}/op)"),
+            n,
+            elapsed,
+            n as f64 / elapsed.as_secs_f64(),
+            elapsed / n as u32
+        );
+    }};
+    ($n:expr, $elapsed:expr) => {
+        display_timings!("operation", $n, $elapsed);
+    };
+}
+
 #[test]
 fn new_one() {
     let dir = tempfile::tempdir().unwrap();
@@ -22,7 +39,7 @@ fn new_one() {
     ct.new_color_class(0x0123ABCD).unwrap();
     ct.end_generation().unwrap();
 
-    ct.sync().unwrap();
+    ct.sync(None).unwrap();
 
     let table = std::fs::read(dir.path().join("color_table")).unwrap();
     assert_eq!(table.len(), 2 * std::mem::size_of::<ColorFragment>());
@@ -43,16 +60,11 @@ fn new_many() {
     for c in 0..N {
         ct.new_color_class(c as u64).unwrap();
     }
-    let elapsed = now.elapsed();
-    eprintln!(
-        "insert {N} colors took {elapsed:?} ({:.2} ops/sec, {:?}/op)",
-        N as f64 / elapsed.as_secs_f64(),
-        elapsed / N as u32
-    );
+    display_timings!("insert new color", N, now.elapsed());
 
     ct.end_generation().unwrap();
 
-    ct.sync().unwrap();
+    ct.sync(None).unwrap();
 
     let ct_file = std::fs::read(dir.path().join("color_table")).unwrap();
     // N + magic
@@ -81,7 +93,7 @@ fn fork_one() {
     assert_eq!(cc_id, ColorId(1));
     assert_eq!(fork_id, ColorId(2));
 
-    ct.sync().unwrap();
+    ct.sync(None).unwrap();
 
     let table = std::fs::read(dir.path().join("color_table")).unwrap();
     // 2 + magic
@@ -119,6 +131,8 @@ fn fork_one_and_iter() {
     ct.unmap();
 }
 
+// this test and `extend_many_and_iter` are slow, because they start and end generations an unreasonable number of times
+// most of the time is spent doing 1,000,000 write syscalls
 #[test]
 fn fork_many_and_iter() {
     const N: usize = 1_000_000;
@@ -135,12 +149,7 @@ fn fork_many_and_iter() {
         cc_id = ct.fork_color_class(cc_id, g as u64).unwrap();
         ct.end_generation().unwrap();
     }
-    let elapsed = now.elapsed();
-    eprintln!(
-        "fork {N} colors took {elapsed:?} ({:.2} ops/sec, {:?}/op)",
-        N as f64 / elapsed.as_secs_f64(),
-        elapsed / N as u32
-    );
+    display_timings!("fork color class", N, now.elapsed());
 
     ct.map().unwrap();
 
@@ -173,7 +182,7 @@ fn extend_one() {
     ct.extend_color_class(cc_id, 0x4567EF00).unwrap();
     ct.end_generation().unwrap();
 
-    ct.sync().unwrap();
+    ct.sync(None).unwrap();
 
     let table = std::fs::read(dir.path().join("color_table")).unwrap();
     // 2 + magic
@@ -205,12 +214,7 @@ fn extend_many_and_iter() {
         ct.extend_color_class(cc_id, g as u64).unwrap();
         ct.end_generation().unwrap();
     }
-    let elapsed = now.elapsed();
-    eprintln!(
-        "extend {N} colors took {elapsed:?} ({:.2} ops/sec, {:?}/op)",
-        N as f64 / elapsed.as_secs_f64(),
-        elapsed / N as u32
-    );
+    display_timings!("extend color class", N, now.elapsed());
 
     ct.map().unwrap();
 
@@ -230,6 +234,7 @@ fn extend_many_and_iter() {
     ct.unmap();
 }
 
+#[cfg(feature = "roaring")]
 #[test]
 fn intersect() {
     let dir = tempfile::tempdir().unwrap();
@@ -249,7 +254,7 @@ fn intersect() {
         .unwrap();
     ct.end_generation().unwrap();
 
-    ct.sync().unwrap();
+    ct.sync(None).unwrap();
 
     // cc1 = 1011001111010101110001001000000...
     // cc2 = 0000000011110111111001101010001...
@@ -282,6 +287,7 @@ fn intersect() {
     // ... etc.
 }
 
+#[cfg(feature = "roaring")]
 #[test]
 fn large_extend_intersect() {
     let get_color = || random_color(32);
@@ -302,7 +308,7 @@ fn large_extend_intersect() {
         ct.end_generation().unwrap();
     }
 
-    ct.sync().unwrap();
+    ct.sync(None).unwrap();
 
     let table = std::fs::read(dir.path().join("color_table")).unwrap();
     dbg!(bstr::BString::from(table));
@@ -329,7 +335,9 @@ fn large_extend_intersect() {
 fn sync_and_load() {
     let get_color = || random_color(16);
     let dir = tempfile::tempdir().unwrap();
-    let mut ct = ColorTable::load_or_new(&dir, ColorTableConfig::default()).unwrap();
+    let config = ColorTableConfig::default();
+
+    let mut ct = ColorTable::load_or_new(&dir, config.clone()).unwrap();
 
     ct.start_generation(0).unwrap();
     let cc1 = ct.new_color_class(get_color()).unwrap();
@@ -341,17 +349,22 @@ fn sync_and_load() {
     let cc3 = ct.fork_color_class(cc2, get_color()).unwrap();
     ct.end_generation().unwrap();
 
-    ct.sync().unwrap();
-    let mut ct2 = ColorTable::load(&dir, ColorTableConfig::default()).unwrap();
+    ct.sync(None).unwrap();
+    let mut ct2 = ColorTable::load(&dir, config).unwrap();
 
     // concurrent read access is supported
     ct.map().unwrap();
     ct2.map().unwrap();
 
     for cc in [&cc1, &cc2, &cc3] {
+        #[cfg(feature = "roaring")]
         assert_eq!(
             ct.color_class(cc).into_bitmap(),
             ct2.color_class(cc).into_bitmap()
         );
+        assert_eq!(
+            ct.color_class(cc).collect::<Vec<_>>(),
+            ct2.color_class(cc).collect::<Vec<_>>()
+        )
     }
 }

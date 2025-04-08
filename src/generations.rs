@@ -10,13 +10,16 @@ use crate::{ColorFragmentIndex, ColorTableError, Result};
 
 #[derive(Debug, PartialEq, Eq, Encode, Decode)]
 enum GenerationState {
-    None,                                // no generation has been started
-    Ended(u64),                          // last generation number
-    InProgress(u64, ColorFragmentIndex), // generation number, first fragment
+    // no generation has been started
+    None,
+    // last generation number
+    Ended(u64),
+    // generation number, first fragment
+    InProgress(u64, ColorFragmentIndex),
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Generations {
+pub struct Generations {
     ranges: RangeMap<ColorFragmentIndex, u64>,
     state: GenerationState,
 }
