@@ -293,6 +293,8 @@ fn large_extend_intersect() {
     let get_color = || random_color(32);
 
     let dir = tempfile::tempdir().unwrap();
+
+    let now = std::time::Instant::now();
     let mut ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
 
     ct.start_generation(0).unwrap();
@@ -301,17 +303,28 @@ fn large_extend_intersect() {
     ct.end_generation().unwrap();
 
     // typical number of epochs for 100k samples
-    for g in 1..30 {
+    const N: usize = 30;
+    for g in 1..N {
         ct.start_generation(g as u64).unwrap();
-        ct.extend_color_class(cc1, get_color()).unwrap();
-        ct.extend_color_class(cc2, get_color()).unwrap();
+        let c1 = get_color();
+        let c2 = get_color();
+        if c1 != 0 {
+            ct.extend_color_class(cc1, c1).unwrap();
+        }
+        if c2 != 0 {
+            ct.extend_color_class(cc2, c2).unwrap();
+        }
         ct.end_generation().unwrap();
     }
 
     ct.sync(None).unwrap();
 
+    let elapsed = now.elapsed();
+    eprintln!("creating color table took {elapsed:?}");
+
     let table = std::fs::read(dir.path().join("color_table")).unwrap();
-    dbg!(bstr::BString::from(table));
+    dbg!(table.len());
+    // dbg!(bstr::BString::from(table));
 
     ct.map().unwrap();
 
@@ -319,7 +332,10 @@ fn large_extend_intersect() {
     let bm1 = ct.color_class(&cc1).into_bitmap();
     let bm2 = ct.color_class(&cc2).into_bitmap();
     let elapsed = now.elapsed();
-    eprintln!("creating 2 bitmaps took {elapsed:?}");
+    eprintln!(
+        "creating 2 bitmaps took {elapsed:?} ({:?}/sample)",
+        elapsed / (N as u32 * u64::BITS) / 2
+    );
 
     ct.unmap();
 
@@ -329,6 +345,7 @@ fn large_extend_intersect() {
     eprintln!("intersection took {elapsed:?}");
 
     dbg!(&intersection);
+    dbg!(intersection.serialized_size());
 }
 
 #[test]

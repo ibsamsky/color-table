@@ -387,7 +387,7 @@ impl ColorTable {
     }
 
     #[inline]
-    const fn new_color_class_id(&self) -> ColorId {
+    fn new_color_class_id(&self) -> ColorId {
         ColorId(self.color_id_head_fragment_map.len() as u32)
     }
 
