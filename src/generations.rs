@@ -121,8 +121,6 @@ impl Generations {
 
                 self.ranges.insert(head..head + 1, generation);
 
-                // TODO: deferred writes
-
                 self.state = GenerationState::InProgress(generation, head);
                 Ok(())
             }

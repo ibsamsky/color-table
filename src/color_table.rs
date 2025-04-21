@@ -51,7 +51,7 @@ use fs4::fs_std::FileExt;
 use crate::generations::Generations;
 use crate::{ColorTableConfig, ColorTableError, Result};
 
-const TABLE_MAGIC: [u8; 12] = *b"CTBL\0\x00\x00\x01\0\0\0\0";
+const TABLE_MAGIC: [u8; std::mem::size_of::<ColorFragment>()] = *b"CTBL\0\x00\x00\x01\0\0\0\0";
 
 /// The index of a color fragment in the color table.
 ///
@@ -141,7 +141,9 @@ impl ColorTableMmap {
         }
         // SAFETY: we hold a read lock on the file. this is not completely safe, but any well-behaved program should respect the lock.
         // if the file is modified while mmapped, UB
-        let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
+        let mmap = unsafe { memmap2::MmapOptions::new().populate().map(&file)? };
+        #[cfg(unix)]
+        mmap.advise(memmap2::Advice::Random)?; // we are reading the file backwards, so tell the OS not to read ahead
 
         Ok(Self { mmap, file })
     }
