@@ -141,7 +141,7 @@ impl ColorTableMmap {
         }
         // SAFETY: we hold a read lock on the file. this is not completely safe, but any well-behaved program should respect the lock.
         // if the file is modified while mmapped, UB
-        let mmap = unsafe { memmap2::MmapOptions::new().populate().map(&file)? };
+        let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
         #[cfg(unix)]
         mmap.advise(memmap2::Advice::Random)?; // we are reading the file backwards, so tell the OS not to read ahead
 
