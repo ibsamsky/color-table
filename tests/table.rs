@@ -385,3 +385,26 @@ fn sync_and_load() {
         )
     }
 }
+
+#[test]
+fn load_and_write() {
+    let get_color = || random_color(16);
+    let dir = tempfile::tempdir().unwrap();
+    let config = ColorTableConfig::default();
+
+    let mut ct = ColorTable::load_or_new(&dir, config.clone()).unwrap();
+
+    ct.start_generation(0).unwrap();
+    let _ = ct.new_color_class(get_color()).unwrap();
+    ct.end_generation().unwrap();
+
+    ct.sync(None).unwrap();
+
+    let mut ct = ColorTable::load(&dir, config).unwrap();
+    assert!(ct.start_generation(0).is_err());
+
+    ct.start_generation(1).unwrap();
+    let _ = ct.new_color_class(get_color()).unwrap();
+    ct.end_generation().unwrap();
+    ct.sync(None).unwrap();
+}

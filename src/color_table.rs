@@ -243,7 +243,10 @@ impl ColorTable {
     ///
     /// Returns an error if the color table files could not be opened (e.g. if the directory or file does not exist).
     pub fn load(dir: impl AsRef<Path>, config: ColorTableConfig) -> Result<Self> {
-        let color_table = File::open(dir.as_ref().join(&config.color_table_file_name))?;
+        let color_table = File::options()
+            .read(true)
+            .write(true)
+            .open(dir.as_ref().join(&config.color_table_file_name))?;
         let ct_size = color_table.metadata()?.len();
         if ct_size % std::mem::size_of::<ColorFragment>() as u64 != 0 {
             return Err(io::Error::from(io::ErrorKind::InvalidData).into());
