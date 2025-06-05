@@ -78,6 +78,7 @@ impl Generations {
     }
 
     /// Get the end of the last generation
+    #[inline]
     fn last_range_end(&self) -> Option<&ColorFragmentIndex> {
         self.ranges.last_range_value().map(|(range, _)| &range.end)
     }
@@ -161,6 +162,7 @@ impl Generations {
     }
 
     /// Find the generation a fragment belongs to
+    #[inline]
     pub fn find(&self, idx: &ColorFragmentIndex) -> Option<&u64> {
         self.ranges.get(idx)
     }

@@ -178,7 +178,7 @@ impl Deref for ColorTableMmap {
 #[derive(Debug)]
 pub struct ColorTable {
     directory: PathBuf,
-    config: ColorTableConfig,
+    config: Box<ColorTableConfig>,
     file: BufWriter<File>,
     mmap: Option<ColorTableMmap>,
     head: ColorFragmentIndex, // more or less file offset of last fragment
@@ -213,7 +213,7 @@ impl ColorTable {
 
         Ok(Self {
             directory: dir.as_ref().to_path_buf(),
-            config,
+            config: Box::new(config),
             file,
             mmap: None,
             // needs_remap: false,
@@ -278,7 +278,7 @@ impl ColorTable {
 
         Ok(Self {
             directory: dir.as_ref().to_path_buf(),
-            config,
+            config: Box::new(config),
             file: BufWriter::with_capacity(buffer_size, color_table),
             mmap: None,
             // needs_remap: false,
@@ -380,6 +380,7 @@ impl ColorTable {
     /// # Errors
     ///
     /// Returns an error if the color table is currently mmapped or if the color table file could not be updated.
+    #[inline]
     fn write_fragment(&mut self, fragment: ColorFragment) -> Result<ColorFragmentIndex> {
         if self.is_mapped() {
             return Err(io::Error::from(io::ErrorKind::ResourceBusy).into());
