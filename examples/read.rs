@@ -31,15 +31,14 @@ fn main() {
     const NUM_READS: usize = 3;
 
     let now = std::time::Instant::now();
-    ct.map().unwrap();
+    let ct_map = ct.map().unwrap();
     for _ in 0..NUM_READS {
         fastrand::shuffle(&mut reads);
         for (i, color_id) in reads.iter() {
-            let color = ct.color_class(color_id).next().unwrap().0;
+            let color = ct_map.color_class(color_id).next().unwrap().0;
             assert_eq!(color, colors[*i]);
         }
     }
-    ct.unmap();
     let elapsed = now.elapsed();
     eprintln!(
         "read {} colors in {elapsed:?} ({:?}/color, {:.2} colors/sec)",

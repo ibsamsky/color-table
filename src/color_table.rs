@@ -180,7 +180,6 @@ pub struct ColorTable {
     directory: PathBuf,
     config: Box<ColorTableConfig>,
     file: BufWriter<File>,
-    mmap: Option<ColorTableMmap>,
     head: ColorFragmentIndex, // more or less file offset of last fragment
     color_id_head_fragment_map: Vec<ColorFragmentIndex>,
     deferred_updates: Vec<DeferredUpdate>,
@@ -215,7 +214,6 @@ impl ColorTable {
             directory: dir.as_ref().to_path_buf(),
             config: Box::new(config),
             file,
-            mmap: None,
             // needs_remap: false,
             head: ColorFragmentIndex(1),
             color_id_head_fragment_map: vec![ColorFragmentIndex(0)],
@@ -280,7 +278,6 @@ impl ColorTable {
             directory: dir.as_ref().to_path_buf(),
             config: Box::new(config),
             file: BufWriter::with_capacity(buffer_size, color_table),
-            mmap: None,
             // needs_remap: false,
             head,
             color_id_head_fragment_map: fragment_map,
@@ -300,12 +297,6 @@ impl ColorTable {
     /// Returns an error if the color table is currently mmapped, or if the color table files could not be updated.
     // maybe want to take config as an argument to avoid storing it in the struct
     pub fn sync(&mut self, config: Option<&ColorTableConfig>) -> Result<()> {
-        // if mmapped, don't sync
-        // alternatively, unmap before syncing
-        if self.is_mapped() {
-            return Err(io::Error::from(io::ErrorKind::ResourceBusy).into());
-        }
-
         let config = config.unwrap_or(&self.config);
 
         // sync table to disk
@@ -341,36 +332,20 @@ impl ColorTable {
     /// # Errors
     ///
     /// Returns an error if a generation is in progress or if mmapping fails.
-    pub fn map(&mut self) -> Result<()> {
+    pub fn map(&mut self) -> Result<MmapGuard<'_>> {
         // reading while a generation is in progress will give incorrect results
         if self.generations.current_generation().is_some() {
             return Err(ColorTableError::InvalidGenerationState);
         }
 
-        // maybe just error if it's already mapped
-        if !self.is_mapped() {
-            // sync to disk
-            self.file.flush()?;
-            // try_clone() here is ~equivalent to dup(2), so the new fd points to the same file object (this is what we want)
-            // SAFETY: `Self` will not modify the file while it is mmapped
-            self.mmap = Some(unsafe { ColorTableMmap::new(self.file.get_ref().try_clone()?) }?);
-        }
+        // sync to disk
+        self.file.flush()?;
 
-        Ok(())
-    }
+        // try_clone() here is ~equivalent to dup(2), so the new fd points to the same file object (this is what we want)
+        // SAFETY: `Self` will not modify the file while it is mmapped
+        let mmap = unsafe { ColorTableMmap::new(self.file.get_ref().try_clone()?) }?;
 
-    fn get_map(&self) -> Result<&ColorTableMmap> {
-        self.mmap.as_ref().ok_or(ColorTableError::NotMapped)
-    }
-
-    #[inline]
-    const fn is_mapped(&self) -> bool {
-        self.mmap.is_some()
-    }
-
-    /// Unmaps the color table from memory.
-    pub fn unmap(&mut self) {
-        self.mmap.take();
+        Ok(MmapGuard(self, mmap))
     }
 
     /// Write a fragment to the end of the file.
@@ -382,9 +357,6 @@ impl ColorTable {
     /// Returns an error if the color table is currently mmapped or if the color table file could not be updated.
     #[inline]
     fn write_fragment(&mut self, fragment: ColorFragment) -> Result<ColorFragmentIndex> {
-        if self.is_mapped() {
-            return Err(io::Error::from(io::ErrorKind::ResourceBusy).into());
-        }
         let index = self.head;
         let bytes = bytemuck::bytes_of(&fragment);
         self.file.write_all(bytes.as_ref())?;
@@ -509,15 +481,17 @@ impl ColorTable {
     fn head_fragment_index(&self, color_id: &ColorId) -> Option<&ColorFragmentIndex> {
         self.color_id_head_fragment_map.get(color_id.0 as usize)
     }
+}
 
+/// RAII guard for a memory-mapped color table.
+#[derive(Debug)]
+pub struct MmapGuard<'a>(&'a mut ColorTable, ColorTableMmap);
+
+impl<'a> MmapGuard<'a> {
+    /// Get a reference to the color table.
     #[inline]
-    fn fragment(&self, idx: &ColorFragmentIndex) -> Option<&ColorFragment> {
-        assert!(self.is_mapped(), "color table must be mapped");
-        if idx.0 == 0 {
-            return None;
-        }
-
-        self.get_map().ok()?.get_fragment(idx)
+    pub fn color_table(&self) -> &ColorTable {
+        self.0
     }
 
     /// Get the parent fragment of the given fragment, if it exists.
@@ -531,25 +505,30 @@ impl ColorTable {
         }
     }
 
+    #[inline]
+    fn fragment(&self, idx: &ColorFragmentIndex) -> Option<&ColorFragment> {
+        if idx.0 == 0 {
+            return None;
+        }
+
+        self.1.get_fragment(idx)
+    }
+
     /// Get an iterator over the color class referred to by the given color id.
     ///
     /// Iterator items are `(partial color, generation)` pairs.
-    pub fn color_class(&self, color_id: &ColorId) -> ClassIter {
-        assert!(self.is_mapped(), "color table must be mapped");
+    pub fn color_class(&self, color_id: &ColorId) -> ClassIter<'_> {
         let idx = self
+            .0
             .head_fragment_index(color_id)
             .unwrap_or(&ColorFragmentIndex(0)); // invalid color id will return an empty iterator
 
-        ClassIter {
-            color_table: self,
-            idx,
-        }
+        ClassIter { map: self, idx }
     }
 }
 
 impl Drop for ColorTable {
     fn drop(&mut self) {
-        // if this is run before unmap, it may block/error
         let _ = self.sync(None);
     }
 }
@@ -557,7 +536,7 @@ impl Drop for ColorTable {
 /// Iterator over a color class.
 #[derive(Debug)]
 pub struct ClassIter<'c> {
-    color_table: &'c ColorTable,
+    map: &'c MmapGuard<'c>,
     idx: &'c ColorFragmentIndex,
 }
 
@@ -592,12 +571,13 @@ impl<'c> Iterator for ClassIter<'c> {
     type Item = (u64, u64); // color, generation
 
     fn next(&mut self) -> Option<Self::Item> {
-        let frag = self.color_table.fragment(self.idx)?;
+        let frag = self.map.fragment(self.idx)?;
 
         let res = (
             frag.color.get(),
             *self
-                .color_table
+                .map
+                .color_table()
                 .generations
                 .find(self.idx)
                 .expect("bug: missing generation"),
@@ -614,7 +594,8 @@ impl<'c> Iterator for ClassIter<'c> {
         };
 
         let upper = self
-            .color_table
+            .map
+            .color_table()
             .generations
             .find(self.idx)
             .map(|g| *g as usize + 1);

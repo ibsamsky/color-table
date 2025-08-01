@@ -116,19 +116,17 @@ fn fork_one_and_iter() {
     let fork_id = ct.fork_color_class(cc_id, 0xABCD0123).unwrap();
     ct.end_generation().unwrap();
 
-    ct.map().unwrap();
+    let ct_map = ct.map().unwrap();
 
     assert_eq!(
-        dbg!(ct.color_class(&fork_id)).collect::<Vec<_>>(),
+        dbg!(ct_map.color_class(&fork_id)).collect::<Vec<_>>(),
         vec![(0xABCD0123, 1), (0x0123ABCD, 0)]
     );
 
     assert_eq!(
-        ct.color_class(&unforked_id).collect::<Vec<_>>(),
+        ct_map.color_class(&unforked_id).collect::<Vec<_>>(),
         vec![(0x4567EF00, 0)]
     );
-
-    ct.unmap();
 }
 
 // this test and `extend_many_and_iter` are slow, because they start and end generations an unreasonable number of times
@@ -151,9 +149,9 @@ fn fork_many_and_iter() {
     }
     display_timings!("fork color class", N, now.elapsed());
 
-    ct.map().unwrap();
+    let ct_map = ct.map().unwrap();
 
-    let iter = ct.color_class(&cc_id);
+    let iter = ct_map.color_class(&cc_id);
 
     let now = std::time::Instant::now();
     for (i, (color, generation)) in (0..N).rev().zip(iter) {
@@ -166,7 +164,6 @@ fn fork_many_and_iter() {
         N as f64 / elapsed.as_secs_f64(),
         elapsed / N as u32
     );
-    ct.unmap();
 }
 
 #[test]
@@ -190,12 +187,11 @@ fn extend_one() {
     dbg!(bstr::BString::from(table));
     dbg!(&ct);
 
-    ct.map().unwrap();
+    let ct_map = ct.map().unwrap();
     assert_eq!(
-        ct.color_class(&cc_id).collect::<Vec<_>>(),
+        ct_map.color_class(&cc_id).collect::<Vec<_>>(),
         vec![(0x4567EF00, 1), (0x0123ABCD, 0)]
     );
-    ct.unmap();
 }
 
 #[test]
@@ -216,9 +212,8 @@ fn extend_many_and_iter() {
     }
     display_timings!("extend color class", N, now.elapsed());
 
-    ct.map().unwrap();
-
-    let iter = ct.color_class(&cc_id);
+    let ct_map = ct.map().unwrap();
+    let iter = ct_map.color_class(&cc_id);
 
     let now = std::time::Instant::now();
     for (i, (color, generation)) in (0..N).rev().zip(iter) {
@@ -231,7 +226,6 @@ fn extend_many_and_iter() {
         N as f64 / elapsed.as_secs_f64(),
         elapsed / N as u32
     );
-    ct.unmap();
 }
 
 #[cfg(feature = "roaring")]
@@ -263,15 +257,13 @@ fn intersect() {
     let table = std::fs::read(dir.path().join("color_table")).unwrap();
     dbg!(bstr::BString::from(table));
 
-    ct.map().unwrap();
+    let ct_map = ct.map().unwrap();
 
     let now = std::time::Instant::now();
-    let bm1 = ct.color_class(&cc1).into_bitmap();
-    let bm2 = ct.color_class(&cc2).into_bitmap();
+    let bm1 = ct_map.color_class(&cc1).into_bitmap();
+    let bm2 = ct_map.color_class(&cc2).into_bitmap();
     let elapsed = now.elapsed();
     eprintln!("creating 2 bitmaps took {elapsed:?}");
-
-    ct.unmap();
 
     let now = std::time::Instant::now();
     let intersection = bm1 & bm2;
@@ -326,18 +318,16 @@ fn large_extend_intersect() {
     dbg!(table.len());
     // dbg!(bstr::BString::from(table));
 
-    ct.map().unwrap();
+    let ct_map = ct.map().unwrap();
 
     let now = std::time::Instant::now();
-    let bm1 = ct.color_class(&cc1).into_bitmap();
-    let bm2 = ct.color_class(&cc2).into_bitmap();
+    let bm1 = ct_map.color_class(&cc1).into_bitmap();
+    let bm2 = ct_map.color_class(&cc2).into_bitmap();
     let elapsed = now.elapsed();
     eprintln!(
         "creating 2 bitmaps took {elapsed:?} ({:?}/sample)",
         elapsed / (N as u32 * u64::BITS) / 2
     );
-
-    ct.unmap();
 
     let now = std::time::Instant::now();
     let intersection = bm1 & bm2;
@@ -370,18 +360,18 @@ fn sync_and_load() {
     let mut ct2 = ColorTable::load(&dir, config).unwrap();
 
     // concurrent read access is supported
-    ct.map().unwrap();
-    ct2.map().unwrap();
+    let ct_map = ct.map().unwrap();
+    let ct2_map = ct2.map().unwrap();
 
     for cc in [&cc1, &cc2, &cc3] {
         #[cfg(feature = "roaring")]
         assert_eq!(
-            ct.color_class(cc).into_bitmap(),
-            ct2.color_class(cc).into_bitmap()
+            ct_map.color_class(cc).into_bitmap(),
+            ct2_map.color_class(cc).into_bitmap()
         );
         assert_eq!(
-            ct.color_class(cc).collect::<Vec<_>>(),
-            ct2.color_class(cc).collect::<Vec<_>>()
+            ct_map.color_class(cc).collect::<Vec<_>>(),
+            ct2_map.color_class(cc).collect::<Vec<_>>()
         )
     }
 }
