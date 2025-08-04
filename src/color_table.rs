@@ -40,7 +40,7 @@
 //! - in order to save space, fragments are (read: should be) stored only if they contain at least one set bit
 
 use std::fs::File;
-use std::io::{self, BufWriter, Write};
+use std::io::{self, BufWriter, Read, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
@@ -241,12 +241,21 @@ impl ColorTable {
     ///
     /// Returns an error if the color table files could not be opened (e.g. if the directory or file does not exist).
     pub fn load(dir: impl AsRef<Path>, config: ColorTableConfig) -> Result<Self> {
-        let color_table = File::options()
+        let mut color_table = File::options()
             .read(true)
-            .write(true)
+            .append(true)
             .open(dir.as_ref().join(&config.color_table_file_name))?;
         let ct_size = color_table.metadata()?.len();
-        if ct_size % std::mem::size_of::<ColorFragment>() as u64 != 0 {
+        if !ct_size.is_multiple_of(std::mem::size_of::<ColorFragment>() as u64) {
+            return Err(io::Error::from(io::ErrorKind::InvalidData).into());
+        }
+
+        // check magic header
+        let mut buf = [0; std::mem::size_of::<ColorFragment>()];
+        color_table.read_exact(&mut buf)?;
+
+        if buf != TABLE_MAGIC {
+            // file was probably truncated or corrupted
             return Err(io::Error::from(io::ErrorKind::InvalidData).into());
         }
 
@@ -257,15 +266,13 @@ impl ColorTable {
             dir.as_ref().join(&config.generations_file_name),
         )?);
         let generations: Generations =
-            bincode::decode_from_std_read(&mut generations_reader, crate::BINCODE_CONFIG)
-                .map_err(|_| ColorTableError::Load)?;
+            bincode::decode_from_std_read(&mut generations_reader, crate::BINCODE_CONFIG)?;
 
         let mut fragment_map_reader = io::BufReader::new(File::open(
             dir.as_ref().join(&config.head_fragment_map_file_name),
         )?);
         let fragment_map: Vec<ColorFragmentIndex> =
-            bincode::decode_from_std_read(&mut fragment_map_reader, crate::BINCODE_CONFIG)
-                .map_err(|_| ColorTableError::Load)?;
+            bincode::decode_from_std_read(&mut fragment_map_reader, crate::BINCODE_CONFIG)?;
 
         if fragment_map.is_empty() {
             return Err(io::Error::from(io::ErrorKind::InvalidData).into());
@@ -309,8 +316,7 @@ impl ColorTable {
             &self.generations,
             &mut generations_writer,
             crate::BINCODE_CONFIG,
-        )
-        .map_err(|_| ColorTableError::Save)?;
+        )?;
 
         let mut fragment_map_writer = io::BufWriter::new(File::create(
             self.directory.join(&config.head_fragment_map_file_name),
@@ -319,8 +325,7 @@ impl ColorTable {
             &self.color_id_head_fragment_map,
             &mut fragment_map_writer,
             crate::BINCODE_CONFIG,
-        )
-        .map_err(|_| ColorTableError::Save)?;
+        )?;
 
         Ok(())
     }
@@ -334,9 +339,9 @@ impl ColorTable {
     /// Returns an error if a generation is in progress or if mmapping fails.
     pub fn map(&mut self) -> Result<MmapGuard<'_>> {
         // reading while a generation is in progress will give incorrect results
-        if self.generations.current_generation().is_some() {
-            return Err(ColorTableError::InvalidGenerationState);
-        }
+        self.check_generation_state("no generation in progress", |g| {
+            g.current_generation().is_none()
+        })?;
 
         // sync to disk
         self.file.flush()?;
@@ -346,6 +351,21 @@ impl ColorTable {
         let mmap = unsafe { ColorTableMmap::new(self.file.get_ref().try_clone()?) }?;
 
         Ok(MmapGuard(self, mmap))
+    }
+
+    fn check_generation_state(
+        &self,
+        expected: &str,
+        f: impl FnOnce(&Generations) -> bool,
+    ) -> Result<()> {
+        if !f(&self.generations) {
+            return Err(ColorTableError::InvalidGenerationState {
+                expected: expected.to_string(),
+                actual: format!("{:?}", self.generations.current_generation()),
+            });
+        }
+
+        Ok(())
     }
 
     /// Write a fragment to the end of the file.
@@ -375,9 +395,9 @@ impl ColorTable {
     /// You **MUST NOT** fork or extend the returned color class until the next generation.
     pub fn new_color_class(&mut self, color: u64) -> Result<ColorId> {
         // cannot add a color class outside of a generation
-        if self.generations.current_generation().is_none() {
-            return Err(ColorTableError::InvalidGenerationState);
-        }
+        self.check_generation_state("generation in progress", |g| {
+            g.current_generation().is_some()
+        })?;
 
         let color_id = self.new_color_class_id();
 
@@ -396,9 +416,9 @@ impl ColorTable {
     /// Returns the index of the new color class.
     /// You **MUST NOT** fork or extend the returned color class until the next generation.
     pub fn fork_color_class(&mut self, parent: ColorId, color: u64) -> Result<ColorId> {
-        if self.generations.current_generation().is_none() {
-            return Err(ColorTableError::InvalidGenerationState);
-        }
+        self.check_generation_state("generation in progress", |g| {
+            g.current_generation().is_some()
+        })?;
 
         let Some(parent_idx) = self.head_fragment_index(&parent) else {
             return Err(ColorTableError::InvalidColorId(parent.0));
@@ -420,9 +440,9 @@ impl ColorTable {
     /// You **MUST NOT** extend the color class again until the next generation.
     /// You may fork the color class after extending it within the same generation.
     pub fn extend_color_class(&mut self, parent: ColorId, color: u64) -> Result<()> {
-        if self.generations.current_generation().is_none() {
-            return Err(ColorTableError::InvalidGenerationState);
-        }
+        self.check_generation_state("generation in progress", |g| {
+            g.current_generation().is_some()
+        })?;
 
         let Some(parent_idx) = self.head_fragment_index(&parent) else {
             return Err(ColorTableError::InvalidColorId(parent.0));
@@ -554,7 +574,7 @@ impl<'c> ClassIter<'c> {
                 .enumerate()
                 .filter_map(|(n, b)| {
                     if b == 1 {
-                        Some(n as u32 + gen_offset as u32)
+                        Some(n as u32 + gen_offset as u32) // FIXME: problem if gen > 2^24 or something (unreasonable)
                     } else {
                         None
                     }

@@ -92,6 +92,7 @@ impl Generations {
         }
     }
 
+    #[expect(dead_code)]
     fn range_of(&self, generation: u64) -> Option<&Range<ColorFragmentIndex>> {
         self.ranges
             .iter()
@@ -108,7 +109,10 @@ impl Generations {
             GenerationState::None => {
                 // first generation must start at 1
                 if !matches!(head, ColorFragmentIndex(1)) {
-                    return Err(ColorTableError::InvalidGenerationState);
+                    return Err(ColorTableError::InvalidGenerationState {
+                        expected: "first generation starts at fragment 1".to_string(),
+                        actual: format!("{head:?}"),
+                    });
                 }
                 self.ranges.insert(head..head + 1, generation);
                 self.state = GenerationState::InProgress(generation, head);
@@ -117,7 +121,13 @@ impl Generations {
             GenerationState::Ended(last_generation) if last_generation < generation => {
                 // don't overlap with previous generation
                 if self.last_range_end().is_some_and(|last| last > &head) {
-                    return Err(ColorTableError::InvalidGenerationState);
+                    return Err(ColorTableError::InvalidGenerationState {
+                        expected: format!(
+                            "no overlapping with previous generation (last: {:?})",
+                            self.last_range_end()
+                        ),
+                        actual: format!("{head:?}"),
+                    });
                 }
 
                 self.ranges.insert(head..head + 1, generation);
@@ -156,7 +166,10 @@ impl Generations {
                 Ok(())
             }
             GenerationState::None | GenerationState::Ended(_) => {
-                Err(ColorTableError::InvalidGenerationState)
+                Err(ColorTableError::InvalidGenerationState {
+                    expected: "generation in progress".to_string(),
+                    actual: format!("{:?}", self.state),
+                })
             }
         }
     }

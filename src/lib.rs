@@ -6,7 +6,7 @@
     feature(doc_cfg_hide),
     doc(cfg_hide(doc))
 )]
-#![warn(clippy::unwrap_used)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
 mod color_table;
 pub use color_table::{ColorFragment, ColorFragmentIndex, ColorId, ColorTable};
@@ -20,20 +20,18 @@ use typed_builder::TypedBuilder;
 
 #[derive(Debug, Error)]
 pub enum ColorTableError {
-    #[error("saving color table failed")]
-    Save,
-    #[error("loading color table failed")]
-    Load,
-    #[error("I/O error")]
+    #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("invalid color id {0}")]
+    #[error("serialization error: {0}")]
+    Serialization(#[from] bincode::error::EncodeError),
+    #[error("deserialization error: {0}")]
+    Deserialization(#[from] bincode::error::DecodeError),
+    #[error("invalid color id: {0}")]
     InvalidColorId(u32),
-    #[error("invalid generation {0}")]
+    #[error("invalid generation: {0}")]
     InvalidGeneration(u64),
-    #[error("invalid generation state")]
-    InvalidGenerationState,
-    #[error("not mapped")]
-    NotMapped,
+    #[error("invalid generation state. expected: {expected}, got: {actual}")]
+    InvalidGenerationState { expected: String, actual: String },
 }
 
 type Result<T, E = ColorTableError> = std::result::Result<T, E>;
