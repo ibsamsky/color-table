@@ -1,13 +1,13 @@
 use color_table::{ColorFragment, ColorId, ColorTable, ColorTableConfig};
 
-fn random_color(max_cardinality: u32) -> u64 {
-    assert!(max_cardinality <= u64::BITS);
+fn random_color(max_cardinality: u32) -> u32 {
+    assert!(max_cardinality <= u32::BITS);
     let mut rng = fastrand::Rng::new();
 
-    let mut color: u64 = 0;
+    let mut color: u32 = 0;
     for _ in 0..max_cardinality {
         color ^= 1;
-        color = color.rotate_left(rng.u32(..u64::BITS));
+        color = color.rotate_left(rng.u32(..u32::BITS));
     }
     color
 }
@@ -32,12 +32,13 @@ macro_rules! display_timings {
 #[test]
 fn new_one() {
     let dir = tempfile::tempdir().unwrap();
-    let mut ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
+    let ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
     dbg!(&ct);
 
-    ct.start_generation(0).unwrap();
-    ct.new_color_class(0x0123ABCD).unwrap();
-    ct.end_generation().unwrap();
+    ct.with_generation(0, |ct| {
+        ct.new_color_class(0x0123ABCD).unwrap();
+    })
+    .unwrap();
 
     ct.sync(None).unwrap();
 
@@ -52,17 +53,16 @@ fn new_many() {
     const N: usize = 1_000_000;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
+    let ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
 
-    ct.start_generation(0).unwrap();
-
-    let now = std::time::Instant::now();
-    for c in 0..N {
-        ct.new_color_class(c as u64).unwrap();
-    }
-    display_timings!("insert new color", N, now.elapsed());
-
-    ct.end_generation().unwrap();
+    ct.with_generation(0, |ct| {
+        let now = std::time::Instant::now();
+        for c in 0..N {
+            ct.new_color_class(c as u32).unwrap();
+        }
+        display_timings!("insert new color", N, now.elapsed());
+    })
+    .unwrap();
 
     ct.sync(None).unwrap();
 
@@ -80,18 +80,18 @@ fn new_many() {
 #[test]
 fn fork_one() {
     let dir = tempfile::tempdir().unwrap();
-    let mut ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
+    let ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
 
-    ct.start_generation(0).unwrap();
-    let cc_id = ct.new_color_class(0x0123ABCD).unwrap();
-    ct.end_generation().unwrap();
+    let cc_id = ct
+        .with_generation(0, |ct| ct.new_color_class(0x0123ABCD).unwrap())
+        .unwrap();
 
-    ct.start_generation(1).unwrap();
-    let fork_id = ct.fork_color_class(cc_id, 0xABCD0123).unwrap();
-    ct.end_generation().unwrap();
+    let fork_id = ct
+        .with_generation(1, |ct| ct.fork_color_class(cc_id, 0xABCD0123).unwrap())
+        .unwrap();
 
-    assert_eq!(cc_id, ColorId(1));
-    assert_eq!(fork_id, ColorId(2));
+    assert_eq!(cc_id, ColorId::new(1));
+    assert_eq!(fork_id, ColorId::new(2));
 
     ct.sync(None).unwrap();
 
@@ -105,16 +105,20 @@ fn fork_one() {
 #[test]
 fn fork_one_and_iter() {
     let dir = tempfile::tempdir().unwrap();
-    let mut ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
+    let ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
 
-    ct.start_generation(0).unwrap();
-    let cc_id = ct.new_color_class(0x0123ABCD).unwrap();
-    let unforked_id = ct.new_color_class(0x4567EF00).unwrap();
-    ct.end_generation().unwrap();
+    let (cc_id, unforked_id) = ct
+        .with_generation(0, |ct| {
+            (
+                ct.new_color_class(0x0123ABCD).unwrap(),
+                ct.new_color_class(0x4567EF00).unwrap(),
+            )
+        })
+        .unwrap();
 
-    ct.start_generation(1).unwrap();
-    let fork_id = ct.fork_color_class(cc_id, 0xABCD0123).unwrap();
-    ct.end_generation().unwrap();
+    let fork_id = ct
+        .with_generation(1, |ct| ct.fork_color_class(cc_id, 0xABCD0123).unwrap())
+        .unwrap();
 
     let ct_map = ct.map().unwrap();
 
@@ -136,17 +140,19 @@ fn fork_many_and_iter() {
     const N: usize = 1_000_000;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
+    let ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
 
     let now = std::time::Instant::now();
-    ct.start_generation(0).unwrap();
-    let mut cc_id = ct.new_color_class(0).unwrap();
-    ct.end_generation().unwrap();
+    let mut cc_id = ct
+        .with_generation(0, |ct| ct.new_color_class(0).unwrap())
+        .unwrap();
     for g in 1..N {
-        ct.start_generation(g as u64).unwrap();
-        cc_id = ct.fork_color_class(cc_id, g as u64).unwrap();
-        ct.end_generation().unwrap();
+        ct.with_generation(g as u64, |ct| {
+            cc_id = ct.fork_color_class(cc_id, g as u32).unwrap();
+        })
+        .unwrap();
     }
+
     display_timings!("fork color class", N, now.elapsed());
 
     let ct_map = ct.map().unwrap();
@@ -155,8 +161,8 @@ fn fork_many_and_iter() {
 
     let now = std::time::Instant::now();
     for (i, (color, generation)) in (0..N).rev().zip(iter) {
-        assert_eq!(color, i as u64);
-        assert_eq!(generation, color);
+        assert_eq!(color, i as u32);
+        assert_eq!(generation, color.into());
     }
     let elapsed = now.elapsed();
     eprintln!(
@@ -169,15 +175,16 @@ fn fork_many_and_iter() {
 #[test]
 fn extend_one() {
     let dir = tempfile::tempdir().unwrap();
-    let mut ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
+    let ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
 
-    ct.start_generation(0).unwrap();
-    let cc_id = ct.new_color_class(0x0123ABCD).unwrap();
-    ct.end_generation().unwrap();
+    let mut cc_id = ct
+        .with_generation(0, |ct| ct.new_color_class(0x0123ABCD).unwrap())
+        .unwrap();
 
-    ct.start_generation(1).unwrap();
-    ct.extend_color_class(cc_id, 0x4567EF00).unwrap();
-    ct.end_generation().unwrap();
+    ct.with_generation(1, |ct| {
+        cc_id = ct.extend_color_class(cc_id, 0x4567EF00).unwrap();
+    })
+    .unwrap();
 
     ct.sync(None).unwrap();
 
@@ -199,16 +206,17 @@ fn extend_many_and_iter() {
     const N: usize = 1_000_000;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
+    let ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
 
     let now = std::time::Instant::now();
-    ct.start_generation(0).unwrap();
-    let cc_id = ct.new_color_class(0).unwrap();
-    ct.end_generation().unwrap();
+    let mut cc_id = ct
+        .with_generation(0, |ct| ct.new_color_class(0).unwrap())
+        .unwrap();
     for g in 1..N {
-        ct.start_generation(g as u64).unwrap();
-        ct.extend_color_class(cc_id, g as u64).unwrap();
-        ct.end_generation().unwrap();
+        ct.with_generation(g as u64, |ct| {
+            cc_id = ct.extend_color_class(cc_id, g as u32).unwrap()
+        })
+        .unwrap();
     }
     display_timings!("extend color class", N, now.elapsed());
 
@@ -217,8 +225,8 @@ fn extend_many_and_iter() {
 
     let now = std::time::Instant::now();
     for (i, (color, generation)) in (0..N).rev().zip(iter) {
-        assert_eq!(color, i as u64);
-        assert_eq!(generation, color);
+        assert_eq!(color, i as u32);
+        assert_eq!(generation, color.into());
     }
     let elapsed = now.elapsed();
     eprintln!(
@@ -228,25 +236,152 @@ fn extend_many_and_iter() {
     );
 }
 
+#[test]
+fn small_threaded() {
+    const TOTAL_POW: u32 = 25;
+
+    const THREADS_POW: u32 = 3;
+    const PER_THREAD_POW: u32 = TOTAL_POW - THREADS_POW;
+
+    const THREADS: usize = 1 << THREADS_POW;
+    const PER_THREAD: usize = 1 << PER_THREAD_POW;
+
+    const TOTAL: usize = (THREADS - 1) << PER_THREAD_POW | (PER_THREAD - 1); // usize::MAX
+
+    let dir = tempfile::tempdir().unwrap();
+    let config = ColorTableConfig::default();
+
+    let ct = ColorTable::new(&dir, config).unwrap();
+
+    let now = std::time::Instant::now();
+    let cids = ct
+        .with_generation(0, |ref ct| {
+            std::thread::scope(|s| {
+                let mut handles = Vec::new();
+
+                for t in 0..THREADS {
+                    let handle = s.spawn(move || {
+                        let mut cids = Vec::new();
+                        for j in 0..PER_THREAD {
+                            let color = (t << PER_THREAD_POW) | j;
+                            let cid = ct.new_color_class(color as u32).unwrap();
+                            cids.push(cid);
+                        }
+                        cids
+                    });
+                    handles.push(handle);
+                }
+
+                let mut cids = Vec::new();
+                for handle in handles {
+                    let thread_cids = handle.join().unwrap();
+                    cids.push(thread_cids);
+                }
+                cids
+            })
+        })
+        .unwrap();
+
+    let elapsed = now.elapsed();
+    display_timings!("insert color classes", TOTAL, elapsed);
+
+    let now = std::time::Instant::now();
+    let map = ct.map().unwrap();
+    let mut colors = std::thread::scope(|s| {
+        // scoped because of borrowed ct
+
+        let mut handles = Vec::new();
+        for thread_cids in cids {
+            let handle = s.spawn(|| {
+                let mut colors = Vec::new();
+                for cid in thread_cids {
+                    let class = map.color_class(&cid).map(|(c, _)| c);
+                    colors.extend(class);
+                }
+                colors
+            });
+            handles.push(handle);
+        }
+
+        let mut colors = Vec::new();
+        for handle in handles {
+            let thread_colors = handle.join().unwrap();
+            colors.extend(thread_colors);
+        }
+        colors
+    });
+    let elapsed = now.elapsed();
+    display_timings!("retrieve color classes", TOTAL, elapsed);
+
+    colors.sort_unstable();
+
+    assert!((0..TOTAL as u32).all(|c| colors.binary_search(&c).is_ok()));
+}
+
+#[test]
+fn concurrent_query() {
+    let dir = tempfile::tempdir().unwrap();
+    let ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
+
+    let timer = std::time::Instant::now();
+
+    std::thread::scope(|s| {
+        let rct = &ct;
+        let jh1 = s.spawn(move || {
+            rct.with_generation(0, |ct| {
+                ct.new_color_class(0b1001000111010101111001101).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(100)); // hold whatever lock for a bit
+            })
+            .unwrap()
+        });
+
+        let jh2 = s.spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            // this query should not be blocked by the above generation in progress
+            let color = rct
+                .map()
+                .unwrap()
+                .color_class(&ColorId::new(1))
+                .collect::<Vec<_>>();
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            color
+        });
+
+        let color = jh2.join().unwrap();
+        assert_eq!(color, vec![(0b1001000111010101111001101, 0)]);
+        jh1.join().unwrap();
+    });
+
+    let elapsed = timer.elapsed();
+    eprintln!("concurrent query took {elapsed:?}");
+    if elapsed.as_millis() > 120 {
+        panic!("concurrent query took too long");
+    }
+}
+
 #[cfg(feature = "roaring")]
 #[test]
 fn intersect() {
     let dir = tempfile::tempdir().unwrap();
-    let mut ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
+    let ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
 
-    ct.start_generation(0).unwrap();
-    let cc1 = ct.new_color_class(0b1001000111010101111001101).unwrap();
-    let cc2 = ct
-        .new_color_class(0b1000101011001111110111100000000)
+    let (cc1, cc2) = ct
+        .with_generation(0, |ct| {
+            (
+                ct.new_color_class(0b1001000111010101111001101).unwrap(),
+                ct.new_color_class(0b1000101011001111110111100000000)
+                    .unwrap(),
+            )
+        })
         .unwrap();
-    ct.end_generation().unwrap();
 
-    ct.start_generation(1).unwrap();
-    ct.extend_color_class(cc1, 0b1000101011001111110111100000000)
-        .unwrap();
-    ct.extend_color_class(cc2, 0b1001000111010101111001101)
-        .unwrap();
-    ct.end_generation().unwrap();
+    ct.with_generation(1, |ct| {
+        ct.extend_color_class(cc1, 0b1000101011001111110111100000000)
+            .unwrap();
+        ct.extend_color_class(cc2, 0b1001000111010101111001101)
+            .unwrap();
+    })
+    .unwrap();
 
     ct.sync(None).unwrap();
 
@@ -287,26 +422,31 @@ fn large_extend_intersect() {
     let dir = tempfile::tempdir().unwrap();
 
     let now = std::time::Instant::now();
-    let mut ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
+    let ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
 
-    ct.start_generation(0).unwrap();
-    let cc1 = ct.new_color_class(get_color()).unwrap();
-    let cc2 = ct.new_color_class(get_color()).unwrap();
-    ct.end_generation().unwrap();
+    let (cc1, cc2) = ct
+        .with_generation(0, |ct| {
+            (
+                ct.new_color_class(get_color()).unwrap(),
+                ct.new_color_class(get_color()).unwrap(),
+            )
+        })
+        .unwrap();
 
     // typical number of epochs for 100k samples
     const N: usize = 30;
     for g in 1..N {
-        ct.start_generation(g as u64).unwrap();
-        let c1 = get_color();
-        let c2 = get_color();
-        if c1 != 0 {
-            ct.extend_color_class(cc1, c1).unwrap();
-        }
-        if c2 != 0 {
-            ct.extend_color_class(cc2, c2).unwrap();
-        }
-        ct.end_generation().unwrap();
+        ct.with_generation(g as u64, |ct| {
+            let c1 = get_color();
+            let c2 = get_color();
+            if c1 != 0 {
+                ct.extend_color_class(cc1, c1).unwrap();
+            }
+            if c2 != 0 {
+                ct.extend_color_class(cc2, c2).unwrap();
+            }
+        })
+        .unwrap();
     }
 
     ct.sync(None).unwrap();
@@ -316,7 +456,6 @@ fn large_extend_intersect() {
 
     let table = std::fs::read(dir.path().join("color_table")).unwrap();
     dbg!(table.len());
-    // dbg!(bstr::BString::from(table));
 
     let ct_map = ct.map().unwrap();
 
@@ -344,20 +483,26 @@ fn sync_and_load() {
     let dir = tempfile::tempdir().unwrap();
     let config = ColorTableConfig::default();
 
-    let mut ct = ColorTable::load_or_new(&dir, config.clone()).unwrap();
+    let ct = ColorTable::load_or_new(&dir, config.clone()).unwrap();
 
-    ct.start_generation(0).unwrap();
-    let cc1 = ct.new_color_class(get_color()).unwrap();
-    let cc2 = ct.new_color_class(get_color()).unwrap();
-    ct.end_generation().unwrap();
+    let (cc1, cc2) = ct
+        .with_generation(0, |ct| {
+            (
+                ct.new_color_class(get_color()).unwrap(),
+                ct.new_color_class(get_color()).unwrap(),
+            )
+        })
+        .unwrap();
 
-    ct.start_generation(1).unwrap();
-    ct.extend_color_class(cc1, get_color()).unwrap();
-    let cc3 = ct.fork_color_class(cc2, get_color()).unwrap();
-    ct.end_generation().unwrap();
+    let cc3 = ct
+        .with_generation(1, |ct| {
+            ct.extend_color_class(cc1, get_color()).unwrap();
+            ct.fork_color_class(cc2, get_color()).unwrap()
+        })
+        .unwrap();
 
     ct.sync(None).unwrap();
-    let mut ct2 = ColorTable::load(&dir, config).unwrap();
+    let ct2 = ColorTable::load(&dir, config).unwrap();
 
     // concurrent read access is supported
     let ct_map = ct.map().unwrap();
@@ -382,19 +527,21 @@ fn load_and_write() {
     let dir = tempfile::tempdir().unwrap();
     let config = ColorTableConfig::default();
 
-    let mut ct = ColorTable::load_or_new(&dir, config.clone()).unwrap();
+    let ct = ColorTable::load_or_new(&dir, config.clone()).unwrap();
 
-    ct.start_generation(0).unwrap();
-    let _ = ct.new_color_class(get_color()).unwrap();
-    ct.end_generation().unwrap();
+    ct.with_generation(0, |ct| {
+        ct.new_color_class(get_color()).unwrap();
+    })
+    .unwrap();
 
     ct.sync(None).unwrap();
 
-    let mut ct = ColorTable::load(&dir, config).unwrap();
-    assert!(ct.start_generation(0).is_err());
+    let ct = ColorTable::load(&dir, config).unwrap();
+    assert!(ct.with_generation(0, |_| {}).is_err());
 
-    ct.start_generation(1).unwrap();
-    let _ = ct.new_color_class(get_color()).unwrap();
-    ct.end_generation().unwrap();
+    ct.with_generation(1, |ct| {
+        ct.new_color_class(get_color()).unwrap();
+    })
+    .unwrap();
     ct.sync(None).unwrap();
 }

@@ -7,14 +7,15 @@ fn main() {
 
     let dir = tempfile::tempdir().unwrap();
 
-    let mut ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
+    let ct = ColorTable::new(&dir, ColorTableConfig::default()).unwrap();
     let now = std::time::Instant::now();
-    ct.start_generation(0).unwrap();
-    let (colors, color_ids): (Vec<u64>, Vec<ColorId>) = (0..n)
-        .map(|i| (i as u64, ct.new_color_class(i as u64).unwrap()))
-        .unzip();
-
-    ct.end_generation().unwrap();
+    let (colors, color_ids): (Vec<u32>, Vec<ColorId>) = ct
+        .with_generation(0, |ct| {
+            (0..n)
+                .map(|i| (i as u32, ct.new_color_class(i as u32).unwrap()))
+                .unzip()
+        })
+        .unwrap();
 
     let elapsed = now.elapsed();
     eprintln!(

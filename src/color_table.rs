@@ -38,6 +38,14 @@
 //! - for the set of kmers `K`, the mapping `K -> C` is surjective.
 //!   - that is, each color class may correspond to multiple kmers, and every possible kmer maps to some color class (for the vast majority of kmers, this is the null color class)
 //! - in order to save space, fragments are (read: should be) stored only if they contain at least one set bit
+//!
+//! Gilbert's notes derived from what Isaac said:
+//! - The index of genome data is made of both a CQF and a color table. The CQF is used for
+//!   membership queries and provides `ColorId`s (stored in the "count" field of a CQF) for each
+//!   k-mer. The `ColorId`s are then passed to a color table, which provides which samples (plural)
+//!   the k-mer is found in.
+//! - Summary: CQF = `HashMap<Kmer, ColorId>`, ColorTable = `HashMap<ColorId, BitVec<Sample>>`.
+//!   Together, they form a colored de Bruijn graph (?).
 
 use std::fs::File;
 use std::io::{self, BufWriter, Read, Write};
@@ -46,18 +54,26 @@ use std::path::{Path, PathBuf};
 
 use bincode::{Decode, Encode};
 use bytemuck::{Pod, Zeroable};
-use fs4::fs_std::FileExt;
+use parking_lot::{Mutex, RwLock};
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "typesize")] {
+        use typesize::TypeSize;
+        use typesize::derive::TypeSize;
+    }
+}
 
 use crate::generations::Generations;
 use crate::{ColorTableConfig, ColorTableError, Result};
 
-const TABLE_MAGIC: [u8; std::mem::size_of::<ColorFragment>()] = *b"CTBL\0\x00\x00\x01\0\0\0\0";
+const TABLE_MAGIC: [u8; std::mem::size_of::<ColorFragment>()] = *b"CTBL\0\x00\x00\x01";
 
 /// The index of a color fragment in the color table.
 ///
 /// The fragment at index 0 is reserved as the parent of the "tail" fragment in a color class.
 /// Real fragment indexes start at 1.
 #[derive(Clone, Copy, Debug, Zeroable, Pod, Encode, Decode, Ord, PartialOrd, Eq, PartialEq)]
+#[cfg_attr(feature = "typesize", derive(TypeSize))]
 #[repr(transparent)]
 pub struct ColorFragmentIndex(pub u32); // up to 4b fragments/colors
 
@@ -65,6 +81,7 @@ impl std::ops::Add<u32> for ColorFragmentIndex {
     type Output = Self;
 
     #[inline]
+    #[track_caller]
     fn add(self, other: u32) -> Self {
         let res = if cfg!(debug_assertions) {
             self.0.checked_add(other).expect("overflow")
@@ -78,6 +95,7 @@ impl std::ops::Add<u32> for ColorFragmentIndex {
 
 impl std::ops::AddAssign<u32> for ColorFragmentIndex {
     #[inline]
+    #[track_caller]
     fn add_assign(&mut self, other: u32) {
         let res = if cfg!(debug_assertions) {
             self.0.checked_add(other).expect("overflow")
@@ -89,13 +107,58 @@ impl std::ops::AddAssign<u32> for ColorFragmentIndex {
     }
 }
 
+impl From<ColorId> for ColorFragmentIndex {
+    #[inline]
+    fn from(id: ColorId) -> Self {
+        ColorFragmentIndex(id.0)
+    }
+}
+
+impl From<&ColorId> for ColorFragmentIndex {
+    #[inline]
+    fn from(id: &ColorId) -> Self {
+        ColorFragmentIndex(id.0)
+    }
+}
+
 /// An identifier for a color class.
 ///
 /// Each color class has a unique, immutable identifier that is used to refer to it.
 /// The color class with id `0` is reserved as the null color class, and is empty.
-#[derive(Clone, Copy, Debug, Zeroable, Pod, Encode, Decode, Ord, PartialOrd, Eq, PartialEq)]
+#[derive(
+    Clone, Copy, Debug, Zeroable, Pod, Encode, Decode, Hash, Ord, PartialOrd, Eq, PartialEq,
+)]
+#[cfg_attr(feature = "typesize", derive(TypeSize))]
 #[repr(transparent)]
-pub struct ColorId(pub u32);
+pub struct ColorId(pub(crate) u32);
+
+impl ColorId {
+    /// Create a new `ColorId` from the given u32 value.
+    #[inline]
+    pub fn new(id: u32) -> Self {
+        Self(id)
+    }
+
+    /// Get the underlying u32 value (file offset) of the color ID.
+    #[inline]
+    pub fn as_u32(&self) -> u32 {
+        self.0
+    }
+}
+
+impl From<ColorFragmentIndex> for ColorId {
+    #[inline]
+    fn from(idx: ColorFragmentIndex) -> Self {
+        ColorId(idx.0)
+    }
+}
+
+impl From<&ColorFragmentIndex> for ColorId {
+    #[inline]
+    fn from(idx: &ColorFragmentIndex) -> Self {
+        ColorId(idx.0)
+    }
+}
 
 /// A color fragment in the color table.
 ///
@@ -104,28 +167,25 @@ pub struct ColorId(pub u32);
 #[derive(Clone, Copy, Debug, Zeroable, Pod)]
 pub struct ColorFragment {
     parent_pointer: ColorFragmentIndex, // or Option<NonZero<ColorFragmentIndex>> or something like that
-    // unpadded u64
-    color: pack1::U64LE,
-}
-
-/// Deferred update to a color class' "head" fragment.
-#[derive(Debug)]
-struct DeferredUpdate {
-    color_id: ColorId,
-    head: ColorFragmentIndex,
+    // unpadded u32
+    color: pack1::U32LE,
 }
 
 /// Wrapper around a memory-mapped color table file.
 #[derive(Debug)]
 struct ColorTableMmap {
     mmap: memmap2::Mmap,
-    file: File,
+}
+
+#[cfg(feature = "typesize")]
+impl TypeSize for ColorTableMmap {
+    fn extra_size(&self) -> usize {
+        self.mmap.len()
+    }
 }
 
 impl ColorTableMmap {
     /// Create a new `ColorTableMmap` from the given file.
-    ///
-    /// Acquires a shared/read lock on the file.
     ///
     /// # Safety
     ///
@@ -133,19 +193,16 @@ impl ColorTableMmap {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file could not be locked.
+    /// Returns an error if the file could not be mmapped.
     unsafe fn new(file: File) -> Result<Self> {
-        if !FileExt::try_lock_shared(&file)? {
-            // could not get file lock
-            return Err(io::Error::from(io::ErrorKind::ResourceBusy).into());
-        }
-        // SAFETY: we hold a read lock on the file. this is not completely safe, but any well-behaved program should respect the lock.
-        // if the file is modified while mmapped, UB
+        // SAFETY: the caller must ensure that the file is not modified.
+        // we never modify the part of the file that is mmapped; we only append to the file, which should not cause any issues.
+        // if the file is truncated (by another process) while mmapped, kernel will send SIGBUS on access
         let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
         #[cfg(unix)]
         mmap.advise(memmap2::Advice::Random)?; // we are reading the file backwards, so tell the OS not to read ahead
 
-        Ok(Self { mmap, file })
+        Ok(Self { mmap })
     }
 
     // may panic in theory, but POSIX standards should guarantee that the memory is aligned to the page size (4KiB)
@@ -156,13 +213,6 @@ impl ColorTableMmap {
 
     fn get_fragment(&self, index: &ColorFragmentIndex) -> Option<&ColorFragment> {
         self.as_fragments().get(index.0 as usize)
-    }
-}
-
-impl Drop for ColorTableMmap {
-    fn drop(&mut self) {
-        // unlock the file so it can be written to again
-        let _ = FileExt::unlock(&self.file);
     }
 }
 
@@ -179,11 +229,22 @@ impl Deref for ColorTableMmap {
 pub struct ColorTable {
     directory: PathBuf,
     config: Box<ColorTableConfig>,
-    file: BufWriter<File>,
-    head: ColorFragmentIndex, // more or less file offset of last fragment
-    color_id_head_fragment_map: Vec<ColorFragmentIndex>,
-    deferred_updates: Vec<DeferredUpdate>,
-    generations: Generations,
+    // buffered writer for the color table file, and current head index
+    // the head index is only modified while holding the lock, so it stays in sync with the file
+    file: Mutex<(BufWriter<File>, ColorFragmentIndex)>,
+
+    generation_lock: Mutex<()>,
+    generations: RwLock<Generations>,
+}
+
+#[cfg(feature = "typesize")]
+impl TypeSize for ColorTable {
+    fn extra_size(&self) -> usize {
+        self.directory.capacity()
+            + self.config.extra_size()
+            + self.file.lock().0.capacity()
+            + (40 * (std::mem::size_of::<ColorFragmentIndex>() + std::mem::size_of::<(u64, u64)>()))
+    }
 }
 
 impl ColorTable {
@@ -213,12 +274,9 @@ impl ColorTable {
         Ok(Self {
             directory: dir.as_ref().to_path_buf(),
             config: Box::new(config),
-            file,
-            // needs_remap: false,
-            head: ColorFragmentIndex(1),
-            color_id_head_fragment_map: vec![ColorFragmentIndex(0)],
-            deferred_updates: Vec::new(),
-            generations: Generations::new(),
+            file: Mutex::new((file, ColorFragmentIndex(1))),
+            generation_lock: Mutex::new(()),
+            generations: RwLock::new(Generations::new()),
         })
     }
 
@@ -265,18 +323,10 @@ impl ColorTable {
         let mut generations_reader = io::BufReader::new(File::open(
             dir.as_ref().join(&config.generations_file_name),
         )?);
-        let generations: Generations =
-            bincode::decode_from_std_read(&mut generations_reader, crate::BINCODE_CONFIG)?;
-
-        let mut fragment_map_reader = io::BufReader::new(File::open(
-            dir.as_ref().join(&config.head_fragment_map_file_name),
+        let generations: RwLock<Generations> = RwLock::new(bincode::decode_from_std_read(
+            &mut generations_reader,
+            crate::BINCODE_CONFIG,
         )?);
-        let fragment_map: Vec<ColorFragmentIndex> =
-            bincode::decode_from_std_read(&mut fragment_map_reader, crate::BINCODE_CONFIG)?;
-
-        if fragment_map.is_empty() {
-            return Err(io::Error::from(io::ErrorKind::InvalidData).into());
-        }
 
         // copy
         let buffer_size = config.buffer_size;
@@ -284,11 +334,8 @@ impl ColorTable {
         Ok(Self {
             directory: dir.as_ref().to_path_buf(),
             config: Box::new(config),
-            file: BufWriter::with_capacity(buffer_size, color_table),
-            // needs_remap: false,
-            head,
-            color_id_head_fragment_map: fragment_map,
-            deferred_updates: Vec::new(),
+            file: Mutex::new((BufWriter::with_capacity(buffer_size, color_table), head)),
+            generation_lock: Mutex::new(()),
             generations,
         })
     }
@@ -303,27 +350,18 @@ impl ColorTable {
     ///
     /// Returns an error if the color table is currently mmapped, or if the color table files could not be updated.
     // maybe want to take config as an argument to avoid storing it in the struct
-    pub fn sync(&mut self, config: Option<&ColorTableConfig>) -> Result<()> {
+    pub fn sync(&self, config: Option<&ColorTableConfig>) -> Result<()> {
         let config = config.unwrap_or(&self.config);
 
         // sync table to disk
-        self.file.flush()?;
+        self.file.lock().0.flush()?;
 
         let mut generations_writer = io::BufWriter::new(File::create(
             self.directory.join(&config.generations_file_name),
         )?);
         bincode::encode_into_std_write(
-            &self.generations,
+            self.generations.read().deref(),
             &mut generations_writer,
-            crate::BINCODE_CONFIG,
-        )?;
-
-        let mut fragment_map_writer = io::BufWriter::new(File::create(
-            self.directory.join(&config.head_fragment_map_file_name),
-        )?);
-        bincode::encode_into_std_write(
-            &self.color_id_head_fragment_map,
-            &mut fragment_map_writer,
             crate::BINCODE_CONFIG,
         )?;
 
@@ -332,40 +370,18 @@ impl ColorTable {
 
     /// Maps the color table to memory.
     ///
-    /// If the color table is already mapped, this is a no-op.
-    ///
     /// # Errors
     ///
-    /// Returns an error if a generation is in progress or if mmapping fails.
-    pub fn map(&mut self) -> Result<MmapGuard<'_>> {
-        // reading while a generation is in progress will give incorrect results
-        self.check_generation_state("no generation in progress", |g| {
-            g.current_generation().is_none()
-        })?;
-
+    /// Returns an error if mmapping fails.
+    pub fn map(&self) -> Result<MmapGuard<'_>> {
         // sync to disk
-        self.file.flush()?;
+        self.file.lock().0.flush()?;
 
         // try_clone() here is ~equivalent to dup(2), so the new fd points to the same file object (this is what we want)
         // SAFETY: `Self` will not modify the file while it is mmapped
-        let mmap = unsafe { ColorTableMmap::new(self.file.get_ref().try_clone()?) }?;
+        let mmap = unsafe { ColorTableMmap::new(self.file.lock().0.get_ref().try_clone()?) }?;
 
         Ok(MmapGuard(self, mmap))
-    }
-
-    fn check_generation_state(
-        &self,
-        expected: &str,
-        f: impl FnOnce(&Generations) -> bool,
-    ) -> Result<()> {
-        if !f(&self.generations) {
-            return Err(ColorTableError::InvalidGenerationState {
-                expected: expected.to_string(),
-                actual: format!("{:?}", self.generations.current_generation()),
-            });
-        }
-
-        Ok(())
     }
 
     /// Write a fragment to the end of the file.
@@ -376,38 +392,76 @@ impl ColorTable {
     ///
     /// Returns an error if the color table is currently mmapped or if the color table file could not be updated.
     #[inline]
-    fn write_fragment(&mut self, fragment: ColorFragment) -> Result<ColorFragmentIndex> {
-        let index = self.head;
-        let bytes = bytemuck::bytes_of(&fragment);
-        self.file.write_all(bytes.as_ref())?;
-        self.head += 1;
+    fn write_fragment(&self, fragment: ColorFragment) -> Result<ColorFragmentIndex> {
+        let index = {
+            let mut guard = self.file.lock();
+            let index = guard.1;
+            let bytes = bytemuck::bytes_of(&fragment);
+            guard.0.write_all(bytes.as_ref())?;
+            guard.1 += 1;
+            index
+        };
+
         Ok(index)
     }
 
-    #[inline]
-    fn new_color_class_id(&self) -> ColorId {
-        ColorId(self.color_id_head_fragment_map.len() as u32)
+    /// Perform an operation within a new generation.
+    ///
+    /// The new generation number must be greater than the last generation.
+    /// The generation will automatically be ended when the provided closure returns.
+    ///
+    /// If this function is called while another generation is in progress, it will block until the other generation has ended.
+    ///
+    /// The color table can still be queried while a generation is in progress, but no changes will be visible until the generation is ended.
+    pub fn with_generation<R>(
+        &self,
+        generation: u64,
+        f: impl FnOnce(GenerationGuard<'_>) -> R,
+    ) -> Result<R> {
+        let _guard = self.generation_lock.lock();
+        self.generations
+            .write()
+            .start_new_generation_at(self.file.lock().1, generation)?;
+
+        // run the closure
+        let res = f(GenerationGuard { table: self });
+
+        self.generations
+            .write()
+            .end_current_generation_at(self.file.lock().1)?;
+
+        self.file.lock().0.flush()?;
+
+        Ok(res)
     }
 
+    #[inline]
+    fn head_fragment_index(&self, color_id: &ColorId) -> Option<ColorFragmentIndex> {
+        if color_id.0 < self.file.lock().1.0 {
+            Some(color_id.into())
+        } else {
+            None
+        }
+    }
+}
+
+pub struct GenerationGuard<'a> {
+    table: &'a ColorTable,
+}
+
+impl<'a> GenerationGuard<'a> {
     /// Creates a new color class.
     ///
     /// Returns the index of the new color class.
     /// You **MUST NOT** fork or extend the returned color class until the next generation.
-    pub fn new_color_class(&mut self, color: u64) -> Result<ColorId> {
-        // cannot add a color class outside of a generation
-        self.check_generation_state("generation in progress", |g| {
-            g.current_generation().is_some()
-        })?;
-
-        let color_id = self.new_color_class_id();
-
+    pub fn new_color_class(&self, color: u32) -> Result<ColorId> {
         let fragment = ColorFragment {
             color: color.into(),
             parent_pointer: ColorFragmentIndex(0),
         };
 
-        let fragment_idx = self.write_fragment(fragment)?;
-        self.color_id_head_fragment_map.push(fragment_idx);
+        let color_id = self.table.write_fragment(fragment)?.into();
+
         Ok(color_id)
     }
 
@@ -415,97 +469,47 @@ impl ColorTable {
     ///
     /// Returns the index of the new color class.
     /// You **MUST NOT** fork or extend the returned color class until the next generation.
-    pub fn fork_color_class(&mut self, parent: ColorId, color: u64) -> Result<ColorId> {
-        self.check_generation_state("generation in progress", |g| {
-            g.current_generation().is_some()
-        })?;
-
-        let Some(parent_idx) = self.head_fragment_index(&parent) else {
+    #[must_use = "`parent` is not modified; you must use the returned `ColorId` to refer to the forked color class"]
+    pub fn fork_color_class(&self, parent: ColorId, color: u32) -> Result<ColorId> {
+        let Some(parent_idx) = self.table.head_fragment_index(&parent) else {
             return Err(ColorTableError::InvalidColorId(parent.0));
         };
 
-        let color_id = self.new_color_class_id();
         let fragment = ColorFragment {
             color: color.into(),
-            parent_pointer: *parent_idx,
+            parent_pointer: parent_idx,
         };
 
-        let fragment_idx = self.write_fragment(fragment)?;
-        self.color_id_head_fragment_map.push(fragment_idx);
+        let color_id = self.table.write_fragment(fragment)?.into();
+
         Ok(color_id)
     }
 
     /// Extend a color class.
     ///
     /// You **MUST NOT** extend the color class again until the next generation.
-    /// You may fork the color class after extending it within the same generation.
-    pub fn extend_color_class(&mut self, parent: ColorId, color: u64) -> Result<()> {
-        self.check_generation_state("generation in progress", |g| {
-            g.current_generation().is_some()
-        })?;
-
-        let Some(parent_idx) = self.head_fragment_index(&parent) else {
+    /// You may fork the color class after extending it within the same generation using the
+    /// *original* [`ColorId`] (passed as `parent`).
+    #[must_use = "`parent` is not modified; you must use the returned `ColorId` to refer to the extended color class"]
+    pub fn extend_color_class(&self, parent: ColorId, color: u32) -> Result<ColorId> {
+        let Some(parent_idx) = self.table.head_fragment_index(&parent) else {
             return Err(ColorTableError::InvalidColorId(parent.0));
         };
 
         let fragment = ColorFragment {
             color: color.into(),
-            parent_pointer: *parent_idx,
+            parent_pointer: parent_idx,
         };
 
-        let fragment_idx = self.write_fragment(fragment)?;
+        let color_id = self.table.write_fragment(fragment)?.into();
 
-        let delayed_write = DeferredUpdate {
-            color_id: parent,
-            head: fragment_idx,
-        };
-
-        self.deferred_updates.push(delayed_write);
-        Ok(())
-    }
-
-    /// Start a new generation.
-    ///
-    /// The new generation number must be greater than the last generation.
-    /// The current generation must be ended before starting a new one.
-    pub fn start_generation(&mut self, generation: u64) -> Result<()> {
-        self.generations
-            .start_new_generation_at(self.head, generation)
-    }
-
-    /// End the current generation.
-    ///
-    /// This will additionally flush the color table to disk.
-    pub fn end_generation(&mut self) -> Result<()> {
-        self.generations.end_current_generation_at(self.head)?;
-
-        // sorting is useful for cache locality? maybe?
-        self.deferred_updates
-            .sort_unstable_by_key(|update| update.color_id);
-
-        // borrow check trolling me
-        for update in self.deferred_updates.drain(..) {
-            let color_id = update.color_id;
-            self.color_id_head_fragment_map
-                .get_mut(color_id.0 as usize)
-                .map(|v| *v = update.head)
-                .ok_or(ColorTableError::InvalidColorId(color_id.0))?;
-        }
-
-        self.file.flush()?;
-
-        Ok(())
-    }
-
-    #[inline]
-    fn head_fragment_index(&self, color_id: &ColorId) -> Option<&ColorFragmentIndex> {
-        self.color_id_head_fragment_map.get(color_id.0 as usize)
+        Ok(color_id)
     }
 }
 
 /// RAII guard for a memory-mapped color table.
 #[derive(Debug)]
-pub struct MmapGuard<'a>(&'a mut ColorTable, ColorTableMmap);
+pub struct MmapGuard<'a>(&'a ColorTable, ColorTableMmap);
 
 impl<'a> MmapGuard<'a> {
     /// Get a reference to the color table.
@@ -536,12 +540,13 @@ impl<'a> MmapGuard<'a> {
 
     /// Get an iterator over the color class referred to by the given color id.
     ///
-    /// Iterator items are `(partial color, generation)` pairs.
+    /// Iterator items are `(partial color, generation)` pairs. The order in which pairs are yielded
+    /// is unspecified. Results may be stale if a generation is in progress.
     pub fn color_class(&self, color_id: &ColorId) -> ClassIter<'_> {
         let idx = self
             .0
             .head_fragment_index(color_id)
-            .unwrap_or(&ColorFragmentIndex(0)); // invalid color id will return an empty iterator
+            .unwrap_or(ColorFragmentIndex(0)); // invalid color id will return an empty iterator
 
         ClassIter { map: self, idx }
     }
@@ -557,41 +562,54 @@ impl Drop for ColorTable {
 #[derive(Debug)]
 pub struct ClassIter<'c> {
     map: &'c MmapGuard<'c>,
-    idx: &'c ColorFragmentIndex,
+    idx: ColorFragmentIndex,
 }
 
 impl<'c> ClassIter<'c> {
     /// Convert the iterator into a roaring bitmap.
-    #[cfg(any(feature = "roaring", doc))]
+    #[cfg(feature = "roaring")]
     pub fn into_bitmap(self) -> roaring::RoaringBitmap {
         let mut bitmap = roaring::RoaringBitmap::new();
-        for (color, _gen) in self {
-            let gen_offset = _gen
-                .checked_mul(u64::BITS as u64)
-                .expect("generation overflow");
-
-            let bits = bitfrob::U64BitIterLow::from_count_and_bits(1, color)
-                .enumerate()
-                .filter_map(|(n, b)| {
-                    if b == 1 {
-                        Some(n as u32 + gen_offset as u32) // FIXME: problem if gen > 2^24 or something (unreasonable)
-                    } else {
-                        None
-                    }
-                });
-
-            bitmap.extend(bits);
-        }
+        let mut set = self.into_indices();
+        set.sort_unstable();
+        bitmap.extend(set.into_iter().map(|i| i as u32));
         bitmap
+    }
+
+    /// Convert the iterator into a vector of indices.
+    ///
+    /// Indices are NOT sorted.
+    pub fn into_indices(self) -> Vec<usize> {
+        #[inline]
+        fn decode_bitmap(buf: &mut Vec<usize>, mut bm: u32, k: u64) {
+            while bm != 0 {
+                let low = bm & bm.wrapping_neg();
+                let idx = bm.trailing_zeros() as u64;
+                buf.push((k * std::mem::size_of_val(&bm) as u64 * 8 + idx) as usize);
+                bm ^= low;
+            }
+        }
+
+        let mut indices = if let Some(len) = self.size_hint().1 {
+            Vec::with_capacity(len * 32) // reasonable estimate; in normal usage this will take about 15 kB at most
+        } else {
+            Vec::new()
+        };
+
+        for (color, gen_) in self {
+            decode_bitmap(&mut indices, color, gen_);
+        }
+
+        indices
     }
 }
 
 // idk if this is bad
 impl<'c> Iterator for ClassIter<'c> {
-    type Item = (u64, u64); // color, generation
+    type Item = (u32, u64); // color, generation
 
     fn next(&mut self) -> Option<Self::Item> {
-        let frag = self.map.fragment(self.idx)?;
+        let frag = self.map.fragment(&self.idx)?;
 
         let res = (
             frag.color.get(),
@@ -599,15 +617,16 @@ impl<'c> Iterator for ClassIter<'c> {
                 .map
                 .color_table()
                 .generations
-                .find(self.idx)
+                .read()
+                .find(&self.idx)
                 .expect("bug: missing generation"),
         );
-        self.idx = &frag.parent_pointer;
+        self.idx = frag.parent_pointer;
         Some(res)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let lower = if self.idx == &ColorFragmentIndex(0) {
+        let lower = if self.idx == ColorFragmentIndex(0) {
             0
         } else {
             1
@@ -617,7 +636,8 @@ impl<'c> Iterator for ClassIter<'c> {
             .map
             .color_table()
             .generations
-            .find(self.idx)
+            .read()
+            .find(&self.idx)
             .map(|g| *g as usize + 1);
         (lower, upper)
     }

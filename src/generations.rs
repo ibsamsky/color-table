@@ -83,15 +83,6 @@ impl Generations {
         self.ranges.last_range_value().map(|(range, _)| &range.end)
     }
 
-    /// Get the current in-progress generation
-    #[inline]
-    pub const fn current_generation(&self) -> Option<u64> {
-        match self.state {
-            GenerationState::InProgress(generation, _) => Some(generation),
-            _ => None,
-        }
-    }
-
     #[expect(dead_code)]
     fn range_of(&self, generation: u64) -> Option<&Range<ColorFragmentIndex>> {
         self.ranges
